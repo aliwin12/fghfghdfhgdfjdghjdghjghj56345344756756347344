@@ -11,15 +11,24 @@ const BOT_TOKEN = process.env.BOT_TOKEN || '8988916261:AAFjUcZnQuDLbXh32A6zUUI64
 // Initialize Telegraf Bot instance
 const bot = new Telegraf(BOT_TOKEN);
 
+// Global Telegraf error catcher to prevent unhandled rejections
+bot.catch((err: any) => {
+  console.error('[TELEGRAF_BOT_ERROR]', err?.message || err);
+});
+
 // 1. Strict Global Filter: Process strictly private messages (DM) only
 bot.use(async (ctx, next) => {
-  if (!ctx.chat || ctx.chat.type !== 'private') {
-    if (ctx.chat) {
-      console.log(`[FILTER_DROP] Ignored message from non-DM chat (Type: ${ctx.chat.type}, ID: ${ctx.chat.id})`);
+  try {
+    if (!ctx.chat || ctx.chat.type !== 'private') {
+      if (ctx.chat) {
+        console.log(`[FILTER_DROP] Ignored message from non-DM chat (Type: ${ctx.chat.type}, ID: ${ctx.chat.id})`);
+      }
+      return;
     }
-    return;
+    return await next();
+  } catch (err: any) {
+    console.error('[MIDDLEWARE_ERROR]', err?.message || err);
   }
-  return next();
 });
 
 // 2. Command handlers in private DMs
@@ -115,7 +124,9 @@ async function startServer() {
       console.error('[WEBHOOK_HANDLE_ERROR]', err);
     } finally {
       // INSTANT ACK: Always respond 200 OK immediately to Telegram
-      res.status(200).end();
+      if (!res.headersSent) {
+        res.status(200).end();
+      }
     }
   });
 
