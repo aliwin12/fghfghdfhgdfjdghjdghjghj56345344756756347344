@@ -12,8 +12,9 @@ export const BOT_FILES: CodeFile[] = [
     content: `// api/bot.js
 // Персональный секретарь для личных сообщений (Stateless DM Mirror)
 // Архитектура: Zero-Retention / Без сохранения состояния (Stateless)
+// Формат: ES Module (совместим с Vercel Serverless Functions & Node.js 18+)
 
-const { Telegraf } = require('telegraf');
+import { Telegraf } from 'telegraf';
 
 // 1. Инициализация экземпляра бота
 const BOT_TOKEN = process.env.BOT_TOKEN || '${BOT_TOKEN}';
@@ -24,8 +25,8 @@ if (!BOT_TOKEN) {
 
 const bot = new Telegraf(BOT_TOKEN || '');
 
-// Глобальный перехватчик ошибок Telegraf (защита от 500 ошибок в Serverless)
-bot.catch((err, ctx) => {
+// Глобальный перехватчик ошибок Telegraf (защита от падений в Serverless)
+bot.catch((err) => {
   console.error('[TELEGRAF_BOT_ERROR]', err?.message || err);
 });
 
@@ -116,9 +117,9 @@ bot.on('message', async (ctx) => {
   }
 });
 
-// 5. Экспорт бессерверного обработчика Webhook (Serverless Function Handler)
-const handler = async (req, res) => {
-  // 1. Обработка GET-запросов (проверка статуса в браузере)
+// 5. Экспорт бессерверного обработчика Webhook (Vercel Serverless Function)
+export default async function handler(req, res) {
+  // 1. Обработка GET-запросов (проверка статуса в браузере или мониторинге)
   if (req.method === 'GET') {
     return res.status(200).json({
       status: 'ok',
@@ -160,13 +161,12 @@ const handler = async (req, res) => {
     return;
   }
 
+  // Для остальных методов
   if (!res.headersSent) {
     res.status(200).end();
   }
-};
+}
 
-module.exports = handler;
-module.exports.default = handler;
 `,
   },
   {
@@ -204,6 +204,7 @@ module.exports.default = handler;
     content: `{
   "name": "telegram-personal-secretary-bot",
   "version": "1.0.0",
+  "type": "module",
   "description": "Stateless Personal Secretary Telegram Bot (DM Mirror & Zero Memory)",
   "main": "api/bot.js",
   "scripts": {

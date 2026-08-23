@@ -1,20 +1,21 @@
 // api/bot.js
 // Персональный секретарь для личных сообщений (Stateless DM Mirror)
 // Архитектура: Zero-Retention / Без сохранения состояния (Stateless)
+// Формат: ES Module (совместим с Vercel Serverless Functions & Node.js 18+)
 
-const { Telegraf } = require('telegraf');
+import { Telegraf } from 'telegraf';
 
 // 1. Инициализация экземпляра бота
 const BOT_TOKEN = process.env.BOT_TOKEN || '8988916261:AAFjUcZnQuDLbXh32A6zUUI64bCPj7KnW6w';
 
 if (!BOT_TOKEN) {
-  console.error('[CONFIG_ERROR] BOT_TOKEN is not defined');
+  console.error('[CONFIG_ERROR] BOT_TOKEN is not defined in environment variables');
 }
 
 const bot = new Telegraf(BOT_TOKEN || '');
 
-// Глобальный перехватчик ошибок Telegraf (предотвращает падение Serverless Function с 500 ошибкой)
-bot.catch((err, ctx) => {
+// Глобальный перехватчик ошибок Telegraf (защита от падений в Serverless)
+bot.catch((err) => {
   console.error('[TELEGRAF_BOT_ERROR]', err?.message || err);
 });
 
@@ -105,9 +106,9 @@ bot.on('message', async (ctx) => {
   }
 });
 
-// 5. Экспорт бессерверного обработчика Webhook (Serverless Function Handler)
-const handler = async (req, res) => {
-  // 1. Обработка GET-запросов (проверка работоспособности в браузере)
+// 5. Экспорт бессерверного обработчика Webhook (Vercel Serverless Function)
+export default async function handler(req, res) {
+  // 1. Обработка GET-запросов (проверка статуса в браузере или мониторинге)
   if (req.method === 'GET') {
     return res.status(200).json({
       status: 'ok',
@@ -125,12 +126,12 @@ const handler = async (req, res) => {
     try {
       let update = req.body;
 
-      // Безопасный парсинг body, если он пришел в виде строки или буфера
+      // Безопасный парсинг body (если пришла строка)
       if (typeof update === 'string') {
         try {
           update = JSON.parse(update);
         } catch (parseErr) {
-          console.warn('[JSON_PARSE_WARNING] Failed to parse request body as JSON:', parseErr.message);
+          console.warn('[JSON_PARSE_WARNING] Failed to parse request body as JSON');
           update = null;
         }
       }
@@ -141,7 +142,7 @@ const handler = async (req, res) => {
     } catch (err) {
       console.error('[WEBHOOK_ERROR]', err?.message || err);
     } finally {
-      // МГНОВЕННЫЙ ACK: Всегда возвращаем HTTP 200 OK Telegram серверу для подтверждения доставки
+      // МГНОВЕННЫЙ ACK: Всегда возвращаем HTTP 200 OK Telegram серверу
       if (!res.headersSent) {
         res.status(200).end();
       }
@@ -149,12 +150,10 @@ const handler = async (req, res) => {
     return;
   }
 
-  // Для остальных методов (OPTIONS, PUT, DELETE)
+  // Для остальных методов (OPTIONS, HEAD и т.д.)
   if (!res.headersSent) {
     res.status(200).end();
   }
-};
+}
 
-module.exports = handler;
-module.exports.default = handler;
 
