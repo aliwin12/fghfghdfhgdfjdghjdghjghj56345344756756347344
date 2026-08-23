@@ -42,6 +42,16 @@ const connectionToOwner = new Map();
 const registeredOwners = new Set();
 let lastKnownOwnerId = null;
 
+// Вспомогательная функция экранирования HTML
+function escapeHtml(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 // Вспомогательная функция формирования заголовка протокола сообщения
 function formatMetadataHeader(from, dateUnix, chatInfo = null, isEdited = false) {
   const date = dateUnix ? new Date(dateUnix * 1000) : new Date();
@@ -56,12 +66,112 @@ function formatMetadataHeader(from, dateUnix, chatInfo = null, isEdited = false)
 
   return (
     \`\${isEdited ? '✏️' : '📋'} <b>[СЕКРЕТАРЬ • \${isEdited ? 'ИЗМЕНЕНО СООБЩЕНИЕ' : 'ПРОТОКОЛ ПЕРЕХВАТА'}]</b>\\n\` +
-    (chatTitle ? \`💬 <b>Диалог:</b> \${chatTitle} (ID: <code>\${chatInfo?.id}</code>)\\n\` : '') +
-    \`👤 <b>Кто написал:</b> \${fullName}\\n\` +
-    \`🔖 <b>Никнейм:</b> \${username}\\n\` +
+    (chatTitle ? \`💬 <b>Диалог:</b> \${chatTitle}\\n\` : '') +
+    \`👤 <b>Кто написал:</b> \${fullName} (\${username})\\n\` +
     \`🆔 <b>ID автора:</b> <code>\${userId}</code>\\n\` +
     \`📅 <b>Когда:</b> \${dateStr} в \${timeStr} (МСК)\`
   );
+}
+
+// Универсальная доставка сообщения/медиафайла в ЛС владельца
+async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited = false) {
+  const sender = bMsg.from;
+  const fromChat = bMsg.chat;
+  const fromChatId = fromChat?.id;
+  const messageId = bMsg.message_id;
+
+  const header = formatMetadataHeader(sender, isEdited ? (bMsg.edit_date || bMsg.date) : bMsg.date, fromChat, isEdited);
+
+  // 1. Текст сообщения (включаем прямо в карточку!)
+  if (bMsg.text) {
+    const fullText = \`\${header}\\n\\n✉️ <b>Текст сообщения:</b>\\n<blockquote>\${escapeHtml(bMsg.text)}</blockquote>\`;
+    if (fullText.length <= 4000) {
+      await telegram.sendMessage(targetOwnerId, fullText, { parse_mode: 'HTML' });
+    } else {
+      await telegram.sendMessage(targetOwnerId, header, { parse_mode: 'HTML' });
+      await telegram.sendMessage(targetOwnerId, bMsg.text);
+    }
+    return;
+  }
+
+  // 2. Фотография
+  if (bMsg.photo && bMsg.photo.length > 0) {
+    const highestPhoto = bMsg.photo[bMsg.photo.length - 1];
+    const captionText = bMsg.caption ? \`\\n\\n💬 <b>Подпись к фото:</b>\\n<blockquote>\${escapeHtml(bMsg.caption)}</blockquote>\` : '';
+    const fullCaption = \`\${header}\${captionText}\`;
+    if (fullCaption.length <= 1024) {
+      await telegram.sendPhoto(targetOwnerId, highestPhoto.file_id, { caption: fullCaption, parse_mode: 'HTML' });
+    } else {
+      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
+      await telegram.sendPhoto(targetOwnerId, highestPhoto.file_id);
+    }
+    return;
+  }
+
+  // 3. Голосовое сообщение
+  if (bMsg.voice) {
+    const duration = bMsg.voice.duration || 0;
+    const fullCaption = \`\${header}\\n\\n🎤 <i>Голосовое сообщение (\${duration} сек.)</i>\`;
+    if (fullCaption.length <= 1024) {
+      await telegram.sendVoice(targetOwnerId, bMsg.voice.file_id, { caption: fullCaption, parse_mode: 'HTML' });
+    } else {
+      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
+      await telegram.sendVoice(targetOwnerId, bMsg.voice.file_id);
+    }
+    return;
+  }
+
+  // 4. Кружочек (video note)
+  if (bMsg.video_note) {
+    await telegram.sendMessage(targetOwnerId, \`\${header}\\n\\n🎥 <i>Видеосообщение (кружочек)</i>\`, { parse_mode: 'HTML' });
+    await telegram.sendVideoNote(targetOwnerId, bMsg.video_note.file_id);
+    return;
+  }
+
+  // 5. Документ / Файл
+  if (bMsg.document) {
+    const docName = bMsg.document.file_name ? \` (<code>\${escapeHtml(bMsg.document.file_name)}</code>)\` : '';
+    const captionText = bMsg.caption ? \`\\n\\n💬 <b>Подпись:</b>\\n<blockquote>\${escapeHtml(bMsg.caption)}</blockquote>\` : '';
+    const fullCaption = \`\${header}\\n📁 <b>Файл:</b>\${docName}\${captionText}\`;
+    if (fullCaption.length <= 1024) {
+      await telegram.sendDocument(targetOwnerId, bMsg.document.file_id, { caption: fullCaption, parse_mode: 'HTML' });
+    } else {
+      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
+      await telegram.sendDocument(targetOwnerId, bMsg.document.file_id);
+    }
+    return;
+  }
+
+  // 6. Видео
+  if (bMsg.video) {
+    const captionText = bMsg.caption ? \`\\n\\n💬 <b>Подпись:</b>\\n<blockquote>\${escapeHtml(bMsg.caption)}</blockquote>\` : '';
+    const fullCaption = \`\${header}\${captionText}\`;
+    if (fullCaption.length <= 1024) {
+      await telegram.sendVideo(targetOwnerId, bMsg.video.file_id, { caption: fullCaption, parse_mode: 'HTML' });
+    } else {
+      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
+      await telegram.sendVideo(targetOwnerId, bMsg.video.file_id);
+    }
+    return;
+  }
+
+  // 7. Стикер
+  if (bMsg.sticker) {
+    const emoji = bMsg.sticker.emoji ? \` (\${bMsg.sticker.emoji})\` : '';
+    await telegram.sendMessage(targetOwnerId, \`\${header}\\n\\n🏷 <b>Стикер</b>\${emoji}\`, { parse_mode: 'HTML' });
+    await telegram.sendSticker(targetOwnerId, bMsg.sticker.file_id);
+    return;
+  }
+
+  // Резервный вариант
+  await telegram.sendMessage(targetOwnerId, header, { parse_mode: 'HTML' });
+  if (fromChatId && messageId) {
+    try {
+      await telegram.copyMessage(targetOwnerId, fromChatId, messageId);
+    } catch (copyErr) {
+      console.warn('[FALLBACK_COPY_FAILED]', copyErr?.message || copyErr);
+    }
+  }
 }
 
 // 2. Обработка подключения бота к аккаунту Telegram Business (управление чужими ЛС)
@@ -122,22 +232,8 @@ bot.on('business_message', async (ctx) => {
       return;
     }
 
-    const header = formatMetadataHeader(sender, bMsg.date, fromChat, false);
     const startTime = Date.now();
-
-    // 1. Отправляем карточку с метаданными в ЛС владельца с ботом
-    await ctx.telegram.sendMessage(
-      targetOwnerId,
-      header,
-      { parse_mode: 'HTML' }
-    );
-
-    // 2. Копируем исходное сообщение (любой тип контента) прямо в ЛС владельца
-    await ctx.telegram.copyMessage(
-      targetOwnerId,
-      fromChatId,
-      messageId
-    );
+    await dispatchBusinessMessage(ctx.telegram, bMsg, targetOwnerId, false);
 
     const elapsed = Date.now() - startTime;
     console.log(\`[BUSINESS_MSG_FORWARDED_TO_OWNER] Msg ID \${messageId} forwarded to owner \${targetOwnerId} (\${elapsed}ms). Chat with client kept clean!\`);
@@ -152,29 +248,10 @@ bot.on('edited_business_message', async (ctx) => {
     const bMsg = ctx.update.edited_business_message;
     if (!bMsg) return;
     const businessConnectionId = bMsg.business_connection_id;
-    const fromChat = bMsg.chat;
-    const fromChatId = fromChat?.id;
-    const messageId = bMsg.message_id;
-    const sender = bMsg.from;
-
     const targetOwnerId = connectionToOwner.get(businessConnectionId) || lastKnownOwnerId;
     if (!targetOwnerId) return;
 
-    console.log(\`[BUSINESS_MSG_EDITED] Chat: \${fromChatId}, Msg ID: \${messageId} -> TargetOwner: \${targetOwnerId}\`);
-
-    const header = formatMetadataHeader(sender, bMsg.edit_date || bMsg.date, fromChat, true);
-    
-    await ctx.telegram.sendMessage(
-      targetOwnerId,
-      header,
-      { parse_mode: 'HTML' }
-    );
-
-    await ctx.telegram.copyMessage(
-      targetOwnerId,
-      fromChatId,
-      messageId
-    );
+    await dispatchBusinessMessage(ctx.telegram, bMsg, targetOwnerId, true);
   } catch (err) {
     console.error('[EDITED_BUSINESS_MSG_ERROR]', err?.message || err);
   }

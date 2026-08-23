@@ -45,7 +45,7 @@ export const BotSimulator: React.FC = () => {
   // Chat 2: Secretary Bot Private DM (Where logs & message copies arrive!)
   const [botChatHistory, setBotChatHistory] = useState<Array<{
     id: number;
-    type: 'welcome' | 'protocol' | 'copy';
+    type: 'welcome' | 'message';
     authorName?: string;
     authorHandle?: string;
     authorId?: string;
@@ -63,37 +63,25 @@ export const BotSimulator: React.FC = () => {
     },
     {
       id: 102,
-      type: 'protocol',
+      type: 'message',
       authorName: 'Алексей Смирнов',
       authorHandle: 'alex_client',
       authorId: '512940182',
-      chatTitle: 'Алексей Смирнов (Клиент)',
+      chatTitle: 'Алексей Смирнов',
+      msgType: 'text',
+      content: 'Владимир, добрый день! Согласовали договор с юристами.',
       timestamp: '14:20:12',
     },
     {
       id: 103,
-      type: 'copy',
-      msgType: 'text',
-      content: 'Владимир, добрый день! Согласовали договор с юристами.',
-      authorName: 'Алексей Смирнов',
-      timestamp: '14:20',
-    },
-    {
-      id: 104,
-      type: 'protocol',
+      type: 'message',
       authorName: 'Владимир',
       authorHandle: 'vladimir_ceo',
       authorId: '849201948',
-      chatTitle: 'Алексей Смирнов (Клиент)',
-      timestamp: '14:21:05',
-    },
-    {
-      id: 105,
-      type: 'copy',
+      chatTitle: 'Алексей Смирнов',
       msgType: 'text',
       content: 'Отлично, высылаю подписанную копию с печатями!',
-      authorName: 'Владимир',
-      timestamp: '14:21',
+      timestamp: '14:21:05',
     },
   ]);
 
@@ -137,46 +125,30 @@ export const BotSimulator: React.FC = () => {
       ]);
     }, 120);
 
-    // Telemetry Step 2: Protocol Card sent to BOT DM
+    // Telemetry Step 2: Combined Message + Author Card sent to BOT DM
     setTimeout(() => {
-      const protocolItem = {
+      const deliveredMsg = {
         id: newMsgId + 1,
-        type: 'protocol' as const,
+        type: 'message' as const,
         authorName: activeSenderName,
         authorHandle: activeSenderHandle,
         authorId: activeSenderId,
-        chatTitle: `${interlocutorName} (Клиент)`,
-        timestamp: fullTimeStr,
-      };
-
-      setBotChatHistory((prev) => [...prev, protocolItem]);
-      setLogs((prev) => [
-        ...prev,
-        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [FORWARD_TO_BOT_DM] Отправлен протокол в ЛС Владельца: Автор="${activeSenderName}", Ник="@${activeSenderHandle}", ID=${activeSenderId}`,
-      ]);
-    }, 280);
-
-    // Telemetry Step 3: Native copyMessage to BOT DM
-    setTimeout(() => {
-      const copyItem = {
-        id: newMsgId + 2,
-        type: 'copy' as const,
+        chatTitle: `${interlocutorName}`,
         msgType: messageType,
         content: messageText,
         caption: messageType === 'photo' ? messageText : undefined,
-        authorName: activeSenderName,
-        timestamp: timeStr,
+        timestamp: fullTimeStr,
       };
 
-      setBotChatHistory((prev) => [...prev, copyItem]);
+      setBotChatHistory((prev) => [...prev, deliveredMsg]);
       setLogs((prev) => [
         ...prev,
-        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [COPY_MESSAGE] copyMessage(target: Owner_DM, from: ClientChat, msgId: ${newMsgId}) -> Точная копия доставлена в ЛС с ботом.`,
+        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [DELIVER_TO_BOT_DM] Сообщение скопировано и доставлено в ЛС Владельца: Автор="${activeSenderName}" (@${activeSenderHandle}), ID=${activeSenderId}`,
         `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [STATELESS_PURGE] Память сервера очищена (0 байт в БД).`,
         `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [HTTP_200_OK] Webhook ACK отправлен Telegram за 14ms.`,
       ]);
       setIsSimulating(false);
-    }, 520);
+    }, 350);
   };
 
   const clearChat = () => {
@@ -576,74 +548,69 @@ export const BotSimulator: React.FC = () => {
                   );
                 }
 
-                // PROTOCOL CARD
-                if (item.type === 'protocol') {
+                // UNIFIED MESSAGE WITH AUTHOR INFO AND COPIED CONTENT
+                if (item.type === 'message') {
                   return (
-                    <div key={item.id} className="flex justify-start my-1">
-                      <div className="bg-slate-900 border border-emerald-500/40 rounded-xl p-2.5 text-xs shadow-lg max-w-[95%] text-slate-200 font-sans space-y-1 w-full">
-                        <div className="flex items-center justify-between pb-1 border-b border-slate-800">
-                          <div className="flex items-center gap-1.5 text-emerald-400 font-bold text-[11px]">
+                    <div key={item.id} className="flex justify-start my-1.5">
+                      <div className="bg-slate-900 border border-blue-500/40 rounded-xl p-3 text-xs shadow-lg max-w-[95%] text-slate-200 font-sans space-y-2 w-full">
+                        {/* Header with Author Details */}
+                        <div className="flex items-center justify-between pb-1.5 border-b border-slate-800">
+                          <div className="flex items-center gap-1.5 text-blue-400 font-bold text-[11px]">
                             <Tag className="w-3.5 h-3.5" />
                             <span>📋 [ПРОТОКОЛ ПЕРЕХВАТА]</span>
                           </div>
                           <span className="text-[9px] text-slate-500">{item.timestamp}</span>
                         </div>
-                        <div className="grid grid-cols-1 gap-0.5 text-[11px] pt-0.5">
-                          <div className="flex items-center gap-1">
-                            <span className="text-slate-400">💬 Диалог:</span>
-                            <span className="font-semibold text-blue-300">{item.chatTitle}</span>
-                          </div>
+
+                        {/* Author Info */}
+                        <div className="grid grid-cols-1 gap-1 text-[11px] bg-slate-950/60 p-2 rounded-lg border border-slate-800/60">
+                          {item.chatTitle && (
+                            <div className="flex items-center gap-1">
+                              <span className="text-slate-400">💬 Диалог:</span>
+                              <span className="font-semibold text-blue-300">{item.chatTitle}</span>
+                            </div>
+                          )}
                           <div className="flex items-center gap-1">
                             <span className="text-slate-400">👤 Кто написал:</span>
                             <span className="font-semibold text-white">{item.authorName}</span>
+                            <span className="text-amber-300 text-[10px]">(@{item.authorHandle})</span>
                           </div>
                           <div className="flex items-center gap-1">
-                            <span className="text-slate-400">🔖 Никнейм:</span>
-                            <span className="text-amber-300">@{item.authorHandle}</span>
-                          </div>
-                          <div className="flex items-center gap-1">
-                            <span className="text-slate-400">🆔 ID:</span>
-                            <code className="bg-slate-950 px-1 py-0.2 rounded text-[10px] text-slate-300 font-mono">
+                            <span className="text-slate-400">🆔 ID автора:</span>
+                            <code className="bg-slate-900 px-1 py-0.2 rounded text-[10px] text-slate-300 font-mono">
                               {item.authorId}
                             </code>
                           </div>
                         </div>
-                      </div>
-                    </div>
-                  );
-                }
 
-                // NATIVE COPY OF MESSAGE
-                if (item.type === 'copy') {
-                  return (
-                    <div key={item.id} className="flex justify-start pl-2">
-                      <div className="bg-slate-800/90 border border-blue-500/20 text-slate-100 rounded-xl rounded-tl-none px-3 py-2 text-xs shadow max-w-[90%]">
-                        <div className="text-[10px] text-blue-400 font-medium mb-0.5 flex items-center gap-1">
-                          <Bot className="w-3 h-3" />
-                          <span>Копия сообщения ({item.authorName}):</span>
+                        {/* Copied Message Content */}
+                        <div className="pt-1">
+                          {item.msgType === 'photo' && (
+                            <div className="mb-2 rounded-lg bg-black/30 p-2 text-[10px] flex items-center gap-1.5 text-slate-300 border border-slate-800">
+                              <Image className="w-4 h-4 text-blue-400" />
+                              <span>[Оригинальное фото]</span>
+                            </div>
+                          )}
+                          {item.msgType === 'document' && (
+                            <div className="mb-2 rounded-lg bg-black/30 p-2 text-[10px] flex items-center gap-1.5 text-slate-300 border border-slate-800">
+                              <Briefcase className="w-4 h-4 text-blue-400" />
+                              <span>document_presentation.pdf</span>
+                            </div>
+                          )}
+                          {item.msgType === 'voice' && (
+                            <div className="mb-2 rounded-lg bg-black/30 p-2 text-[10px] flex items-center gap-1.5 text-slate-300 border border-slate-800">
+                              <Mic className="w-4 h-4 text-blue-400" />
+                              <span>🎤 Голосовое сообщение (0:18)</span>
+                            </div>
+                          )}
+
+                          {item.content && (
+                            <div className="bg-blue-950/30 border-l-2 border-blue-500 pl-2.5 py-1.5 rounded-r text-slate-100 text-xs break-words">
+                              <div className="text-[10px] text-blue-400 font-medium mb-0.5">✉️ Текст сообщения:</div>
+                              {item.content}
+                            </div>
+                          )}
                         </div>
-
-                        {item.msgType === 'photo' && (
-                          <div className="mb-1 rounded bg-black/30 p-1.5 text-[10px] flex items-center gap-1 text-slate-300">
-                            <Image className="w-3.5 h-3.5" />
-                            <span>[Оригинальное фото]</span>
-                          </div>
-                        )}
-                        {item.msgType === 'document' && (
-                          <div className="mb-1 rounded bg-black/30 p-1.5 text-[10px] flex items-center gap-1 text-slate-300">
-                            <Briefcase className="w-3.5 h-3.5" />
-                            <span>document_presentation.pdf</span>
-                          </div>
-                        )}
-                        {item.msgType === 'voice' && (
-                          <div className="mb-1 rounded bg-black/30 p-1.5 text-[10px] flex items-center gap-1 text-slate-300">
-                            <Mic className="w-3.5 h-3.5" />
-                            <span>Голосовое сообщение (0:18)</span>
-                          </div>
-                        )}
-
-                        <div className="text-xs break-words">{item.content}</div>
-                        <div className="text-[9px] text-right text-slate-400 mt-1">{item.timestamp}</div>
                       </div>
                     </div>
                   );
