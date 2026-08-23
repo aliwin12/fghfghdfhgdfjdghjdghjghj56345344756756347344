@@ -25,6 +25,12 @@ const connectionToOwner = new Map();
 const registeredOwners = new Set();
 let lastKnownOwnerId = null;
 
+// Режимы фильтрации: 'all' (все сообщения), 'my_only' (только исходящие владельца), 'clients_only' (только входящие от клиентов)
+const ownerFilterMode = new Map();
+
+// Список доверенных получателей (делегатов) владельца: Map<ownerId, Set<delegateId>>
+const ownerDelegates = new Map();
+
 // Вспомогательная функция экранирования HTML
 function escapeHtml(text) {
   if (!text) return '';
@@ -56,161 +62,241 @@ function formatMetadataHeader(from, dateUnix, chatInfo = null, isEdited = false)
   );
 }
 
-// Универсальная доставка сообщения и всех видов медиа в ЛС владельца
+// Клавиатура шеринга под сообщением
+function getShareKeyboard(previewText = 'Секретарь') {
+  return {
+    inline_keyboard: [
+      [
+        { text: '📤 Поделиться в Telegram', switch_inline_query: previewText.slice(0, 40) },
+        { text: '👥 Переслать коллегам', callback_data: 'share_to_delegates' },
+      ],
+      [
+        { text: '⚙️ Фильтры сообщений', callback_data: 'open_filter_menu' },
+        { text: '👥 Список команды', callback_data: 'open_team_menu' },
+      ],
+    ],
+  };
+}
+
+// Универсальная доставка сообщения СТРОГО подключившему владельцу и его доверенным получателям
 async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited = false) {
   const sender = bMsg.from;
   const fromChat = bMsg.chat;
   const fromChatId = fromChat?.id;
   const messageId = bMsg.message_id;
 
+  // Проверяем фильтр владельца
+  const currentFilter = ownerFilterMode.get(targetOwnerId) || 'all';
+  const isSentByOwner = sender?.id === targetOwnerId;
+
+  if (currentFilter === 'my_only' && !isSentByOwner) {
+    console.log(`[FILTER_SKIP] Message from ${sender?.id} ignored (mode: my_only, owner: ${targetOwnerId})`);
+    return;
+  }
+
+  if (currentFilter === 'clients_only' && isSentByOwner) {
+    console.log(`[FILTER_SKIP] Outgoing message from owner ${targetOwnerId} ignored (mode: clients_only)`);
+    return;
+  }
+
   const header = formatMetadataHeader(sender, isEdited ? (bMsg.edit_date || bMsg.date) : bMsg.date, fromChat, isEdited);
+  const shareKeyboard = getShareKeyboard(bMsg.text || bMsg.caption || 'Сообщение');
 
-  // 1. ТЕКСТОВОЕ СООБЩЕНИЕ (Включаем текст прямо в карточку!)
-  if (bMsg.text) {
-    const fullText = `${header}\n\n✉️ <b>Текст сообщения:</b>\n<blockquote>${escapeHtml(bMsg.text)}</blockquote>`;
-    if (fullText.length <= 4000) {
-      await telegram.sendMessage(targetOwnerId, fullText, { parse_mode: 'HTML' });
-    } else {
-      await telegram.sendMessage(targetOwnerId, header, { parse_mode: 'HTML' });
-      await telegram.sendMessage(targetOwnerId, bMsg.text);
+  // Получатели: владелец + доверенные лица
+  const recipients = new Set([targetOwnerId]);
+  const delegates = ownerDelegates.get(targetOwnerId);
+  if (delegates) {
+    for (const delegateId of delegates) {
+      recipients.add(delegateId);
     }
-    return;
   }
 
-  // 2. ФОТОГРАФИЯ
-  if (bMsg.photo && bMsg.photo.length > 0) {
-    const highestPhoto = bMsg.photo[bMsg.photo.length - 1];
-    const captionText = bMsg.caption ? `\n\n💬 <b>Подпись к фото:</b>\n<blockquote>${escapeHtml(bMsg.caption)}</blockquote>` : '';
-    const fullCaption = `${header}${captionText}`;
-    
-    if (fullCaption.length <= 1024) {
-      await telegram.sendPhoto(targetOwnerId, highestPhoto.file_id, {
-        caption: fullCaption,
-        parse_mode: 'HTML',
-      });
-    } else {
-      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
-      await telegram.sendPhoto(targetOwnerId, highestPhoto.file_id);
-    }
-    return;
-  }
-
-  // 3. ГОЛОСОВОЕ СООБЩЕНИЕ
-  if (bMsg.voice) {
-    const duration = bMsg.voice.duration || 0;
-    const fullCaption = `${header}\n\n🎤 <i>Голосовое сообщение (${duration} сек.)</i>`;
-    if (fullCaption.length <= 1024) {
-      await telegram.sendVoice(targetOwnerId, bMsg.voice.file_id, {
-        caption: fullCaption,
-        parse_mode: 'HTML',
-      });
-    } else {
-      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
-      await telegram.sendVoice(targetOwnerId, bMsg.voice.file_id);
-    }
-    return;
-  }
-
-  // 4. ВИДЕОСООБЩЕНИЕ (Кружочек)
-  if (bMsg.video_note) {
-    await telegram.sendMessage(targetOwnerId, `${header}\n\n🎥 <i>Видеосообщение (кружочек)</i>`, { parse_mode: 'HTML' });
-    await telegram.sendVideoNote(targetOwnerId, bMsg.video_note.file_id);
-    return;
-  }
-
-  // 5. ДОКУМЕНТ / ФАЙЛ
-  if (bMsg.document) {
-    const docName = bMsg.document.file_name ? ` (<code>${escapeHtml(bMsg.document.file_name)}</code>)` : '';
-    const captionText = bMsg.caption ? `\n\n💬 <b>Подпись:</b>\n<blockquote>${escapeHtml(bMsg.caption)}</blockquote>` : '';
-    const fullCaption = `${header}\n📁 <b>Файл:</b>${docName}${captionText}`;
-    
-    if (fullCaption.length <= 1024) {
-      await telegram.sendDocument(targetOwnerId, bMsg.document.file_id, {
-        caption: fullCaption,
-        parse_mode: 'HTML',
-      });
-    } else {
-      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
-      await telegram.sendDocument(targetOwnerId, bMsg.document.file_id);
-    }
-    return;
-  }
-
-  // 6. ВИДЕО
-  if (bMsg.video) {
-    const captionText = bMsg.caption ? `\n\n💬 <b>Подпись:</b>\n<blockquote>${escapeHtml(bMsg.caption)}</blockquote>` : '';
-    const fullCaption = `${header}${captionText}`;
-    if (fullCaption.length <= 1024) {
-      await telegram.sendVideo(targetOwnerId, bMsg.video.file_id, {
-        caption: fullCaption,
-        parse_mode: 'HTML',
-      });
-    } else {
-      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
-      await telegram.sendVideo(targetOwnerId, bMsg.video.file_id);
-    }
-    return;
-  }
-
-  // 7. АУДИОЗАПИСЬ
-  if (bMsg.audio) {
-    const fullCaption = `${header}\n\n🎵 <b>Аудио:</b> ${escapeHtml(bMsg.audio.performer || '')} — ${escapeHtml(bMsg.audio.title || '')}`;
-    if (fullCaption.length <= 1024) {
-      await telegram.sendAudio(targetOwnerId, bMsg.audio.file_id, {
-        caption: fullCaption,
-        parse_mode: 'HTML',
-      });
-    } else {
-      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
-      await telegram.sendAudio(targetOwnerId, bMsg.audio.file_id);
-    }
-    return;
-  }
-
-  // 8. СТИКЕР
-  if (bMsg.sticker) {
-    const emoji = bMsg.sticker.emoji ? ` (${bMsg.sticker.emoji})` : '';
-    await telegram.sendMessage(targetOwnerId, `${header}\n\n🏷 <b>Стикер</b>${emoji}`, { parse_mode: 'HTML' });
-    await telegram.sendSticker(targetOwnerId, bMsg.sticker.file_id);
-    return;
-  }
-
-  // 9. АНИМАЦИЯ / GIF
-  if (bMsg.animation) {
-    await telegram.sendAnimation(targetOwnerId, bMsg.animation.file_id, {
-      caption: header.length <= 1024 ? header : undefined,
-      parse_mode: 'HTML',
-    });
-    return;
-  }
-
-  // 10. ЛОКАЦИЯ
-  if (bMsg.location) {
-    await telegram.sendMessage(targetOwnerId, `${header}\n\n📍 <b>Геолокация:</b>`, { parse_mode: 'HTML' });
-    await telegram.sendLocation(targetOwnerId, bMsg.location.latitude, bMsg.location.longitude);
-    return;
-  }
-
-  // 11. КОНТАКТ
-  if (bMsg.contact) {
-    await telegram.sendMessage(
-      targetOwnerId,
-      `${header}\n\n👤 <b>Контакт:</b> ${escapeHtml(bMsg.contact.first_name)} ${escapeHtml(bMsg.contact.last_name || '')} (${escapeHtml(bMsg.contact.phone_number)})`,
-      { parse_mode: 'HTML' }
-    );
-    await telegram.sendContact(targetOwnerId, bMsg.contact.phone_number, bMsg.contact.first_name, {
-      last_name: bMsg.contact.last_name,
-    });
-    return;
-  }
-
-  // Резервный вариант (попытка прямого copyMessage)
-  await telegram.sendMessage(targetOwnerId, header, { parse_mode: 'HTML' });
-  if (fromChatId && messageId) {
+  for (const recipientId of recipients) {
     try {
-      await telegram.copyMessage(targetOwnerId, fromChatId, messageId);
-    } catch (copyErr) {
-      console.warn('[FALLBACK_COPY_FAILED]', copyErr?.message || copyErr);
+      const isDelegate = recipientId !== targetOwnerId;
+      const delegatePrefix = isDelegate ? `<i>[ПЕРЕСЛАНО ИЗ БИЗНЕС-АККАУНТА @${sender?.username || targetOwnerId}]</i>\n\n` : '';
+
+      // 1. ТЕКСТОВОЕ СООБЩЕНИЕ
+      if (bMsg.text) {
+        const fullText = `${delegatePrefix}${header}\n\n✉️ <b>Текст сообщения:</b>\n<blockquote>${escapeHtml(bMsg.text)}</blockquote>`;
+        if (fullText.length <= 4000) {
+          await telegram.sendMessage(recipientId, fullText, {
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, `${delegatePrefix}${header}`, { parse_mode: 'HTML' });
+          await telegram.sendMessage(recipientId, bMsg.text, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 2. ФОТОГРАФИЯ
+      if (bMsg.photo && bMsg.photo.length > 0) {
+        const highestPhoto = bMsg.photo[bMsg.photo.length - 1];
+        const captionText = bMsg.caption ? `\n\n💬 <b>Подпись к фото:</b>\n<blockquote>${escapeHtml(bMsg.caption)}</blockquote>` : '';
+        const fullCaption = `${delegatePrefix}${header}${captionText}`;
+        
+        if (fullCaption.length <= 1024) {
+          await telegram.sendPhoto(recipientId, highestPhoto.file_id, {
+            caption: fullCaption,
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, fullCaption, { parse_mode: 'HTML' });
+          await telegram.sendPhoto(recipientId, highestPhoto.file_id, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 3. ГОЛОСОВОЕ СООБЩЕНИЕ
+      if (bMsg.voice) {
+        const duration = bMsg.voice.duration || 0;
+        const fullCaption = `${delegatePrefix}${header}\n\n🎤 <i>Голосовое сообщение (${duration} сек.)</i>`;
+        if (fullCaption.length <= 1024) {
+          await telegram.sendVoice(recipientId, bMsg.voice.file_id, {
+            caption: fullCaption,
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, fullCaption, { parse_mode: 'HTML' });
+          await telegram.sendVoice(recipientId, bMsg.voice.file_id, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 4. ВИДЕОСООБЩЕНИЕ (Кружочек)
+      if (bMsg.video_note) {
+        await telegram.sendMessage(recipientId, `${delegatePrefix}${header}\n\n🎥 <i>Видеосообщение (кружочек)</i>`, { parse_mode: 'HTML' });
+        await telegram.sendVideoNote(recipientId, bMsg.video_note.file_id, {
+          reply_markup: isDelegate ? undefined : shareKeyboard,
+        });
+        continue;
+      }
+
+      // 5. ДОКУМЕНТ / ФАЙЛ
+      if (bMsg.document) {
+        const docName = bMsg.document.file_name ? ` (<code>${escapeHtml(bMsg.document.file_name)}</code>)` : '';
+        const captionText = bMsg.caption ? `\n\n💬 <b>Подпись:</b>\n<blockquote>${escapeHtml(bMsg.caption)}</blockquote>` : '';
+        const fullCaption = `${delegatePrefix}${header}\n📁 <b>Файл:</b>${docName}${captionText}`;
+        
+        if (fullCaption.length <= 1024) {
+          await telegram.sendDocument(recipientId, bMsg.document.file_id, {
+            caption: fullCaption,
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, fullCaption, { parse_mode: 'HTML' });
+          await telegram.sendDocument(recipientId, bMsg.document.file_id, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 6. ВИДЕО
+      if (bMsg.video) {
+        const captionText = bMsg.caption ? `\n\n💬 <b>Подпись:</b>\n<blockquote>${escapeHtml(bMsg.caption)}</blockquote>` : '';
+        const fullCaption = `${delegatePrefix}${header}${captionText}`;
+        if (fullCaption.length <= 1024) {
+          await telegram.sendVideo(recipientId, bMsg.video.file_id, {
+            caption: fullCaption,
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, fullCaption, { parse_mode: 'HTML' });
+          await telegram.sendVideo(recipientId, bMsg.video.file_id, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 7. АУДИОЗАПИСЬ
+      if (bMsg.audio) {
+        const fullCaption = `${delegatePrefix}${header}\n\n🎵 <b>Аудио:</b> ${escapeHtml(bMsg.audio.performer || '')} — ${escapeHtml(bMsg.audio.title || '')}`;
+        if (fullCaption.length <= 1024) {
+          await telegram.sendAudio(recipientId, bMsg.audio.file_id, {
+            caption: fullCaption,
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, fullCaption, { parse_mode: 'HTML' });
+          await telegram.sendAudio(recipientId, bMsg.audio.file_id, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 8. СТИКЕР
+      if (bMsg.sticker) {
+        const emoji = bMsg.sticker.emoji ? ` (${bMsg.sticker.emoji})` : '';
+        await telegram.sendMessage(recipientId, `${delegatePrefix}${header}\n\n🏷 <b>Стикер</b>${emoji}`, { parse_mode: 'HTML' });
+        await telegram.sendSticker(recipientId, bMsg.sticker.file_id, {
+          reply_markup: isDelegate ? undefined : shareKeyboard,
+        });
+        continue;
+      }
+
+      // 9. АНИМАЦИЯ / GIF
+      if (bMsg.animation) {
+        await telegram.sendAnimation(recipientId, bMsg.animation.file_id, {
+          caption: header.length <= 1024 ? `${delegatePrefix}${header}` : undefined,
+          parse_mode: 'HTML',
+          reply_markup: isDelegate ? undefined : shareKeyboard,
+        });
+        continue;
+      }
+
+      // 10. ЛОКАЦИЯ
+      if (bMsg.location) {
+        await telegram.sendMessage(recipientId, `${delegatePrefix}${header}\n\n📍 <b>Геолокация:</b>`, { parse_mode: 'HTML' });
+        await telegram.sendLocation(recipientId, bMsg.location.latitude, bMsg.location.longitude, {
+          reply_markup: isDelegate ? undefined : shareKeyboard,
+        });
+        continue;
+      }
+
+      // 11. КОНТАКТ
+      if (bMsg.contact) {
+        await telegram.sendMessage(
+          recipientId,
+          `${delegatePrefix}${header}\n\n👤 <b>Контакт:</b> ${escapeHtml(bMsg.contact.first_name)} ${escapeHtml(bMsg.contact.last_name || '')} (${escapeHtml(bMsg.contact.phone_number)})`,
+          { parse_mode: 'HTML' }
+        );
+        await telegram.sendContact(recipientId, bMsg.contact.phone_number, bMsg.contact.first_name, {
+          last_name: bMsg.contact.last_name,
+          reply_markup: isDelegate ? undefined : shareKeyboard,
+        });
+        continue;
+      }
+
+      // Резервный вариант
+      await telegram.sendMessage(recipientId, `${delegatePrefix}${header}`, {
+        parse_mode: 'HTML',
+        reply_markup: isDelegate ? undefined : shareKeyboard,
+      });
+      if (fromChatId && messageId) {
+        try {
+          await telegram.copyMessage(recipientId, fromChatId, messageId);
+        } catch (copyErr) {
+          console.warn('[FALLBACK_COPY_FAILED]', copyErr?.message || copyErr);
+        }
+      }
+    } catch (sendErr) {
+      console.error(`[DISPATCH_ERROR_RECIPIENT_${recipientId}]`, sendErr?.message || sendErr);
     }
   }
 }
@@ -354,17 +440,300 @@ bot.start(async (ctx) => {
 
 bot.help(async (ctx) => {
   try {
+    const userId = ctx.from?.id;
+    const currentMode = (userId ? ownerFilterMode.get(userId) : null) || 'all';
+    const delegatesCount = (userId ? ownerDelegates.get(userId)?.size : 0) || 0;
+
+    const modeLabels = {
+      all: '💬 Все сообщения (Входящие + Исходящие)',
+      my_only: '👤 Только МОИ сообщения',
+      clients_only: '👥 Только сообщения клиентов/собеседников',
+    };
+
     return await ctx.replyWithHTML(
-      `ℹ️ <b>Справка Персонального Секретаря:</b>\n\n` +
-      `💼 <b>Как подключить к чужим ЛС через Telegram Business:</b>\n` +
-      `1. Откройте <b>Настройки Telegram</b> (требуется Telegram Premium / Business).\n` +
-      `2. Перейдите в <b>Telegram для бизнеса → Чат-боты</b>.\n` +
-      `3. Введите юзернейм этого бота и включите доступ к личным чатам.\n` +
-      `4. Все сообщения из ваших личных диалогов будут мгновенно протоколироваться и дублироваться <b>в этот чат с ботом</b>.\n\n` +
-      `⚙️ Команды: /start, /help, /status`
+      `ℹ️ <b>Справка Персонального Секретаря Telegram:</b>\n\n` +
+      `🛡 <b>Кому приходят сообщения:</b>\n` +
+      `Бот пересылает сообщения <b>СТРОГО ВАМ</b> (в этот личный чат). В чатах с собеседниками бот ничего не пишет и не спамит!\n\n` +
+      `⚙️ <b>Текущие настройки:</b>\n` +
+      `• Фильтр: <b>${modeLabels[currentMode] || modeLabels.all}</b>\n` +
+      `• Доверенные коллеги (Sharing): <b>${delegatesCount} чел.</b>\n\n` +
+      `📋 <b>Доступные команды:</b>\n` +
+      `• <code>/mode</code> или <code>/filter</code> — изменить фильтр (все / только мои / только клиентов)\n` +
+      `• <code>/share &lt;ID&gt;</code> — добавить коллегу/ассистента для отправки копий\n` +
+      `• <code>/unshare &lt;ID&gt;</code> — удалить коллегу из списка\n` +
+      `• <code>/team</code> — список подключенных коллег\n` +
+      `• <code>/status</code> — статус подключения и память (0 KB Stateless)\n\n` +
+      `📤 <b>Как делиться сообщениями:</b>\n` +
+      `Под каждым протоколом есть кнопки:\n` +
+      `• <b>«📤 Поделиться в Telegram»</b> — отправка в любой чат через инлайн-меню.\n` +
+      `• <b>«👥 Переслать коллегам»</b> — мгновенная отправка всей команде из <code>/team</code>.`
     );
   } catch (err) {
     console.error('[HELP_CMD_ERROR]', err?.message || err);
+  }
+});
+
+// Команда /filter или /mode для выбора типа пересылаемых реплик
+bot.command(['mode', 'filter'], async (ctx) => {
+  try {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const currentMode = ownerFilterMode.get(userId) || 'all';
+
+    return await ctx.replyWithHTML(
+      `⚙️ <b>Настройка фильтрации бизнес-сообщений:</b>\n\n` +
+      `Выберите, какие сообщения пересылать вам в этот чат:\n\n` +
+      `• <b>Все сообщения:</b> входящие от клиентов и ваши ответы.\n` +
+      `• <b>Только мои:</b> бот сохраняет только ваши реплики, обещания и отправленные файлы.\n` +
+      `• <b>Только клиентов:</b> входящие обращения от клиентов/партнеров.\n\n` +
+      `Текущий режим: <b>${currentMode === 'all' ? '💬 Все сообщения' : currentMode === 'my_only' ? '👤 Только мои' : '👥 Только клиентов'}</b>`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: (currentMode === 'all' ? '✅ ' : '') + '💬 Все сообщения', callback_data: 'set_filter_all' },
+            ],
+            [
+              { text: (currentMode === 'my_only' ? '✅ ' : '') + '👤 Только мои сообщения', callback_data: 'set_filter_my_only' },
+            ],
+            [
+              { text: (currentMode === 'clients_only' ? '✅ ' : '') + '👥 Только от клиентов', callback_data: 'set_filter_clients_only' },
+            ],
+          ],
+        },
+      }
+    );
+  } catch (err) {
+    console.error('[MODE_CMD_ERROR]', err?.message || err);
+  }
+});
+
+// Команда /share <userId> для добавления доверенного лица
+bot.command('share', async (ctx) => {
+  try {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const args = ctx.message.text.split(' ').slice(1).filter(Boolean);
+    if (args.length === 0) {
+      return await ctx.replyWithHTML(
+        `📤 <b>Добавление получателя для шеринга:</b>\n\n` +
+        `Использование: <code>/share &lt;Telegram_ID_коллеги&gt;</code>\n\n` +
+        `<i>Пример:</i> <code>/share 512940182</code>\n\n` +
+        `💡 Чтобы узнать свой ID, ваш коллега может написать боту команду <code>/start</code>.`
+      );
+    }
+
+    const targetDelegateId = parseInt(args[0], 10);
+    if (isNaN(targetDelegateId)) {
+      return await ctx.reply('❌ Укажите корректный числовой Telegram ID пользователя (например: /share 123456789)');
+    }
+
+    if (!ownerDelegates.has(userId)) {
+      ownerDelegates.set(userId, new Set());
+    }
+    ownerDelegates.get(userId).add(targetDelegateId);
+
+    return await ctx.replyWithHTML(
+      `✅ <b>Коллега успешно добавлен в список доверенных лиц!</b>\n\n` +
+      `🆔 <b>ID получателя:</b> <code>${targetDelegateId}</code>\n\n` +
+      `Теперь вы можете делиться сообщениями в 1 клик с помощью кнопки <b>«👥 Переслать коллегам»</b>.`
+    );
+  } catch (err) {
+    console.error('[SHARE_CMD_ERROR]', err?.message || err);
+  }
+});
+
+// Команда /unshare <userId>
+bot.command('unshare', async (ctx) => {
+  try {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const args = ctx.message.text.split(' ').slice(1).filter(Boolean);
+    if (args.length === 0) {
+      return await ctx.reply('Использование: /unshare <Telegram_ID_коллеги>');
+    }
+
+    const targetDelegateId = parseInt(args[0], 10);
+    const delegates = ownerDelegates.get(userId);
+    if (delegates && delegates.has(targetDelegateId)) {
+      delegates.delete(targetDelegateId);
+      return await ctx.replyWithHTML(`✅ Пользователь <code>${targetDelegateId}</code> удален из списка шеринга.`);
+    } else {
+      return await ctx.replyWithHTML(`ℹ️ Пользователь <code>${targetDelegateId}</code> не найден в вашем списке доверенных лиц.`);
+    }
+  } catch (err) {
+    console.error('[UNSHARE_CMD_ERROR]', err?.message || err);
+  }
+});
+
+// Команда /team — просмотр списка коллег
+bot.command('team', async (ctx) => {
+  try {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const delegates = ownerDelegates.get(userId);
+    if (!delegates || delegates.size === 0) {
+      return await ctx.replyWithHTML(
+        `👥 <b>Список коллег для шеринга пуст.</b>\n\n` +
+        `Вы можете добавить ассистентов, менеджеров или каналы командой:\n` +
+        `<code>/share &lt;Telegram_ID&gt;</code>\n\n` +
+        `После добавления вы сможете пересылать им любые перехваченные реплики в 1 клик!`
+      );
+    }
+
+    const listStr = Array.from(delegates)
+      .map((id, idx) => `${idx + 1}. 🆔 <code>${id}</code>`)
+      .join('\n');
+
+    return await ctx.replyWithHTML(
+      `👥 <b>Доверенные получатели сообщений (${delegates.size} чел.):</b>\n\n` +
+      `${listStr}\n\n` +
+      `➕ Добавить: <code>/share &lt;ID&gt;</code>\n` +
+      `➖ Удалить: <code>/unshare &lt;ID&gt;</code>`
+    );
+  } catch (err) {
+    console.error('[TEAM_CMD_ERROR]', err?.message || err);
+  }
+});
+
+// Callback queries для инлайн кнопок
+bot.action(/^set_filter_(all|my_only|clients_only)$/, async (ctx) => {
+  try {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const newFilter = ctx.match[1];
+    ownerFilterMode.set(userId, newFilter);
+
+    const filterName = newFilter === 'all' ? '💬 Все сообщения' : newFilter === 'my_only' ? '👤 Только МОИ сообщения' : '👥 Только сообщения клиентов';
+
+    await ctx.answerCbQuery(`Режим изменен: ${filterName}`);
+    await ctx.editMessageText(
+      `✅ <b>Фильтр сообщений обновлен!</b>\n\n` +
+      `Текущий режим: <b>${filterName}</b>\n\n` +
+      `• <i>all:</i> пересылаются все диалоги.\n` +
+      `• <i>my_only:</i> пересылаются только ваши реплики.\n` +
+      `• <i>clients_only:</i> пересылаются только входящие от клиентов.`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: (newFilter === 'all' ? '✅ ' : '') + '💬 Все сообщения', callback_data: 'set_filter_all' },
+            ],
+            [
+              { text: (newFilter === 'my_only' ? '✅ ' : '') + '👤 Только мои сообщения', callback_data: 'set_filter_my_only' },
+            ],
+            [
+              { text: (newFilter === 'clients_only' ? '✅ ' : '') + '👥 Только от клиентов', callback_data: 'set_filter_clients_only' },
+            ],
+          ],
+        },
+      }
+    );
+  } catch (err) {
+    console.error('[FILTER_CALLBACK_ERROR]', err?.message || err);
+  }
+});
+
+bot.action('share_to_delegates', async (ctx) => {
+  try {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const delegates = ownerDelegates.get(userId);
+    if (!delegates || delegates.size === 0) {
+      await ctx.answerCbQuery('⚠️ Список коллег пуст! Добавьте ID командой /share <ID>', { show_alert: true });
+      return;
+    }
+
+    const originalMsg = ctx.callbackQuery.message;
+    if (originalMsg) {
+      for (const delId of delegates) {
+        try {
+          if (originalMsg.text) {
+            await ctx.telegram.sendMessage(delId, `📤 <b>[ПЕРЕСЛАНО ВЛАДЕЛЬЦЕМ]</b>\n\n${originalMsg.text}`, { parse_mode: 'HTML' });
+          } else if (originalMsg.caption) {
+            await ctx.telegram.copyMessage(delId, originalMsg.chat.id, originalMsg.message_id, {
+              caption: `📤 <b>[ПЕРЕСЛАНО ВЛАДЕЛЬЦЕМ]</b>\n\n${originalMsg.caption}`,
+              parse_mode: 'HTML',
+            });
+          } else {
+            await ctx.telegram.copyMessage(delId, originalMsg.chat.id, originalMsg.message_id);
+          }
+        } catch (e) {
+          console.warn(`[SHARE_TO_DELEGATE_FAILED_${delId}]`, e?.message || e);
+        }
+      }
+    }
+
+    await ctx.answerCbQuery(`✅ Переслано ${delegates.size} коллегам в команду!`);
+  } catch (err) {
+    console.error('[SHARE_ACTION_ERROR]', err?.message || err);
+  }
+});
+
+bot.action('open_filter_menu', async (ctx) => {
+  try {
+    const userId = ctx.from?.id;
+    const currentMode = (userId ? ownerFilterMode.get(userId) : null) || 'all';
+    await ctx.answerCbQuery();
+    await ctx.replyWithHTML(
+      `⚙️ <b>Выберите режим фильтрации сообщений:</b>`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: (currentMode === 'all' ? '✅ ' : '') + '💬 Все сообщения', callback_data: 'set_filter_all' }],
+            [{ text: (currentMode === 'my_only' ? '✅ ' : '') + '👤 Только мои сообщения', callback_data: 'set_filter_my_only' }],
+            [{ text: (currentMode === 'clients_only' ? '✅ ' : '') + '👥 Только от клиентов', callback_data: 'set_filter_clients_only' }],
+          ],
+        },
+      }
+    );
+  } catch (err) {
+    console.error('[OPEN_FILTER_ERROR]', err?.message || err);
+  }
+});
+
+bot.action('open_team_menu', async (ctx) => {
+  try {
+    const userId = ctx.from?.id;
+    const delegates = userId ? ownerDelegates.get(userId) : null;
+    const count = delegates?.size || 0;
+    await ctx.answerCbQuery();
+    await ctx.replyWithHTML(
+      `👥 <b>Управление командой и получателями (${count} чел.):</b>\n\n` +
+      `Используйте <code>/share &lt;ID&gt;</code> для добавления коллеги.\n` +
+      `Используйте <code>/team</code> для просмотра списка.`
+    );
+  } catch (err) {
+    console.error('[OPEN_TEAM_ERROR]', err?.message || err);
+  }
+});
+
+// Inline Query Handler
+bot.on('inline_query', async (ctx) => {
+  try {
+    const query = ctx.inlineQuery.query || 'Протокол перехвата Секретаря';
+    const results = [
+      {
+        type: 'article',
+        id: '1',
+        title: '📤 Поделиться репликой / протоколом',
+        description: query.slice(0, 50),
+        input_message_content: {
+          message_text: `📋 <b>[СЕКРЕТАРЬ • ЭКСПОРТ СООБЩЕНИЯ]</b>\n\n<blockquote>${escapeHtml(query)}</blockquote>\n\n🔒 <i>Отправлено через Персонального Секретаря</i>`,
+          parse_mode: 'HTML',
+        },
+      },
+    ];
+    await ctx.answerInlineQuery(results, { cache_time: 5 });
+  } catch (err) {
+    console.error('[INLINE_QUERY_ERROR]', err?.message || err);
   }
 });
 

@@ -14,11 +14,12 @@ export const BOT_FILES: BotFile[] = [
     name: 'bot.js',
     path: 'api/bot.js',
     language: 'javascript',
-    description: 'Главная Serverless Function Vercel (Webhook). Перехватывает входящие и исходящие сообщения из чужих ЛС через Telegram Business и пересылает протокол с точной копией в ваш личный диалог с ботом.',
+    description: 'Главная Serverless Function Vercel (Webhook). Перехватывает сообщения из чужих ЛС через Telegram Business, строго направляет их подключившему владельцу в ЛС бота, фильтрует по /mode и позволяет делиться с коллегами (/share, /team).',
     content: `// api/bot.js
 // Персональный секретарь для личных сообщений и чужих ЛС (Telegram Business + Stateless Mirror)
 // Архитектура: Zero-Retention / Без сохранения состояния (Stateless)
-// Логика: перехват всех входящих и исходящих сообщений в бизнес-чатах и отправка протокола с копией в ЛС владельца с ботом!
+// Логика: перехват входящих/исходящих сообщений в бизнес-чатах и отправка протокола с копией в ЛС владельца с ботом!
+// Поддержка: индивидуальная доставка подключившему владельцу, фильтрация (/mode) и шеринг (/share, /team)
 // Формат: ES Module (совместим с Vercel Serverless Functions & Node.js 18+)
 
 import { Telegraf } from 'telegraf';
@@ -41,6 +42,12 @@ bot.catch((err) => {
 const connectionToOwner = new Map();
 const registeredOwners = new Set();
 let lastKnownOwnerId = null;
+
+// Режимы фильтрации: 'all' (все сообщения), 'my_only' (только исходящие владельца), 'clients_only' (только входящие от клиентов)
+const ownerFilterMode = new Map();
+
+// Список доверенных получателей (делегатов) владельца: Map<ownerId, Set<delegateId>>
+const ownerDelegates = new Map();
 
 // Вспомогательная функция экранирования HTML
 function escapeHtml(text) {
@@ -73,103 +80,190 @@ function formatMetadataHeader(from, dateUnix, chatInfo = null, isEdited = false)
   );
 }
 
-// Универсальная доставка сообщения/медиафайла в ЛС владельца
+// Клавиатура шеринга под сообщением
+function getShareKeyboard(previewText = 'Секретарь') {
+  return {
+    inline_keyboard: [
+      [
+        { text: '📤 Поделиться в Telegram', switch_inline_query: previewText.slice(0, 40) },
+        { text: '👥 Переслать коллегам', callback_data: 'share_to_delegates' },
+      ],
+      [
+        { text: '⚙️ Фильтры сообщений', callback_data: 'open_filter_menu' },
+        { text: '👥 Список команды', callback_data: 'open_team_menu' },
+      ],
+    ],
+  };
+}
+
+// Универсальная доставка сообщения СТРОГО подключившему владельцу и его доверенным получателям
 async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited = false) {
   const sender = bMsg.from;
   const fromChat = bMsg.chat;
   const fromChatId = fromChat?.id;
   const messageId = bMsg.message_id;
 
+  // Проверяем фильтр владельца
+  const currentFilter = ownerFilterMode.get(targetOwnerId) || 'all';
+  const isSentByOwner = sender?.id === targetOwnerId;
+
+  if (currentFilter === 'my_only' && !isSentByOwner) {
+    console.log(\`[FILTER_SKIP] Message from \${sender?.id} ignored (mode: my_only, owner: \${targetOwnerId})\`);
+    return;
+  }
+
+  if (currentFilter === 'clients_only' && isSentByOwner) {
+    console.log(\`[FILTER_SKIP] Outgoing message from owner \${targetOwnerId} ignored (mode: clients_only)\`);
+    return;
+  }
+
   const header = formatMetadataHeader(sender, isEdited ? (bMsg.edit_date || bMsg.date) : bMsg.date, fromChat, isEdited);
+  const shareKeyboard = getShareKeyboard(bMsg.text || bMsg.caption || 'Сообщение');
 
-  // 1. Текст сообщения (включаем прямо в карточку!)
-  if (bMsg.text) {
-    const fullText = \`\${header}\\n\\n✉️ <b>Текст сообщения:</b>\\n<blockquote>\${escapeHtml(bMsg.text)}</blockquote>\`;
-    if (fullText.length <= 4000) {
-      await telegram.sendMessage(targetOwnerId, fullText, { parse_mode: 'HTML' });
-    } else {
-      await telegram.sendMessage(targetOwnerId, header, { parse_mode: 'HTML' });
-      await telegram.sendMessage(targetOwnerId, bMsg.text);
+  // Получатели: владелец + доверенные лица
+  const recipients = new Set([targetOwnerId]);
+  const delegates = ownerDelegates.get(targetOwnerId);
+  if (delegates) {
+    for (const delegateId of delegates) {
+      recipients.add(delegateId);
     }
-    return;
   }
 
-  // 2. Фотография
-  if (bMsg.photo && bMsg.photo.length > 0) {
-    const highestPhoto = bMsg.photo[bMsg.photo.length - 1];
-    const captionText = bMsg.caption ? \`\\n\\n💬 <b>Подпись к фото:</b>\\n<blockquote>\${escapeHtml(bMsg.caption)}</blockquote>\` : '';
-    const fullCaption = \`\${header}\${captionText}\`;
-    if (fullCaption.length <= 1024) {
-      await telegram.sendPhoto(targetOwnerId, highestPhoto.file_id, { caption: fullCaption, parse_mode: 'HTML' });
-    } else {
-      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
-      await telegram.sendPhoto(targetOwnerId, highestPhoto.file_id);
-    }
-    return;
-  }
-
-  // 3. Голосовое сообщение
-  if (bMsg.voice) {
-    const duration = bMsg.voice.duration || 0;
-    const fullCaption = \`\${header}\\n\\n🎤 <i>Голосовое сообщение (\${duration} сек.)</i>\`;
-    if (fullCaption.length <= 1024) {
-      await telegram.sendVoice(targetOwnerId, bMsg.voice.file_id, { caption: fullCaption, parse_mode: 'HTML' });
-    } else {
-      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
-      await telegram.sendVoice(targetOwnerId, bMsg.voice.file_id);
-    }
-    return;
-  }
-
-  // 4. Кружочек (video note)
-  if (bMsg.video_note) {
-    await telegram.sendMessage(targetOwnerId, \`\${header}\\n\\n🎥 <i>Видеосообщение (кружочек)</i>\`, { parse_mode: 'HTML' });
-    await telegram.sendVideoNote(targetOwnerId, bMsg.video_note.file_id);
-    return;
-  }
-
-  // 5. Документ / Файл
-  if (bMsg.document) {
-    const docName = bMsg.document.file_name ? \` (<code>\${escapeHtml(bMsg.document.file_name)}</code>)\` : '';
-    const captionText = bMsg.caption ? \`\\n\\n💬 <b>Подпись:</b>\\n<blockquote>\${escapeHtml(bMsg.caption)}</blockquote>\` : '';
-    const fullCaption = \`\${header}\\n📁 <b>Файл:</b>\${docName}\${captionText}\`;
-    if (fullCaption.length <= 1024) {
-      await telegram.sendDocument(targetOwnerId, bMsg.document.file_id, { caption: fullCaption, parse_mode: 'HTML' });
-    } else {
-      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
-      await telegram.sendDocument(targetOwnerId, bMsg.document.file_id);
-    }
-    return;
-  }
-
-  // 6. Видео
-  if (bMsg.video) {
-    const captionText = bMsg.caption ? \`\\n\\n💬 <b>Подпись:</b>\\n<blockquote>\${escapeHtml(bMsg.caption)}</blockquote>\` : '';
-    const fullCaption = \`\${header}\${captionText}\`;
-    if (fullCaption.length <= 1024) {
-      await telegram.sendVideo(targetOwnerId, bMsg.video.file_id, { caption: fullCaption, parse_mode: 'HTML' });
-    } else {
-      await telegram.sendMessage(targetOwnerId, fullCaption, { parse_mode: 'HTML' });
-      await telegram.sendVideo(targetOwnerId, bMsg.video.file_id);
-    }
-    return;
-  }
-
-  // 7. Стикер
-  if (bMsg.sticker) {
-    const emoji = bMsg.sticker.emoji ? \` (\${bMsg.sticker.emoji})\` : '';
-    await telegram.sendMessage(targetOwnerId, \`\${header}\\n\\n🏷 <b>Стикер</b>\${emoji}\`, { parse_mode: 'HTML' });
-    await telegram.sendSticker(targetOwnerId, bMsg.sticker.file_id);
-    return;
-  }
-
-  // Резервный вариант
-  await telegram.sendMessage(targetOwnerId, header, { parse_mode: 'HTML' });
-  if (fromChatId && messageId) {
+  for (const recipientId of recipients) {
     try {
-      await telegram.copyMessage(targetOwnerId, fromChatId, messageId);
-    } catch (copyErr) {
-      console.warn('[FALLBACK_COPY_FAILED]', copyErr?.message || copyErr);
+      const isDelegate = recipientId !== targetOwnerId;
+      const delegatePrefix = isDelegate ? \`<i>[ПЕРЕСЛАНО ИЗ БИЗНЕС-АККАУНТА @\${sender?.username || targetOwnerId}]</i>\\n\\n\` : '';
+
+      // 1. ТЕКСТОВОЕ СООБЩЕНИЕ
+      if (bMsg.text) {
+        const fullText = \`\${delegatePrefix}\${header}\\n\\n✉️ <b>Текст сообщения:</b>\\n<blockquote>\${escapeHtml(bMsg.text)}</blockquote>\`;
+        if (fullText.length <= 4000) {
+          await telegram.sendMessage(recipientId, fullText, {
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, \`\${delegatePrefix}\${header}\`, { parse_mode: 'HTML' });
+          await telegram.sendMessage(recipientId, bMsg.text, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 2. ФОТОГРАФИЯ
+      if (bMsg.photo && bMsg.photo.length > 0) {
+        const highestPhoto = bMsg.photo[bMsg.photo.length - 1];
+        const captionText = bMsg.caption ? \`\\n\\n💬 <b>Подпись к фото:</b>\\n<blockquote>\${escapeHtml(bMsg.caption)}</blockquote>\` : '';
+        const fullCaption = \`\${delegatePrefix}\${header}\${captionText}\`;
+        
+        if (fullCaption.length <= 1024) {
+          await telegram.sendPhoto(recipientId, highestPhoto.file_id, {
+            caption: fullCaption,
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, fullCaption, { parse_mode: 'HTML' });
+          await telegram.sendPhoto(recipientId, highestPhoto.file_id, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 3. ГОЛОСОВОЕ СООБЩЕНИЕ
+      if (bMsg.voice) {
+        const duration = bMsg.voice.duration || 0;
+        const fullCaption = \`\${delegatePrefix}\${header}\\n\\n🎤 <i>Голосовое сообщение (\${duration} сек.)</i>\`;
+        if (fullCaption.length <= 1024) {
+          await telegram.sendVoice(recipientId, bMsg.voice.file_id, {
+            caption: fullCaption,
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, fullCaption, { parse_mode: 'HTML' });
+          await telegram.sendVoice(recipientId, bMsg.voice.file_id, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 4. ВИДЕОСООБЩЕНИЕ (Кружочек)
+      if (bMsg.video_note) {
+        await telegram.sendMessage(recipientId, \`\${delegatePrefix}\${header}\\n\\n🎥 <i>Видеосообщение (кружочек)</i>\`, { parse_mode: 'HTML' });
+        await telegram.sendVideoNote(recipientId, bMsg.video_note.file_id, {
+          reply_markup: isDelegate ? undefined : shareKeyboard,
+        });
+        continue;
+      }
+
+      // 5. ДОКУМЕНТ / ФАЙЛ
+      if (bMsg.document) {
+        const docName = bMsg.document.file_name ? \` (<code>\${escapeHtml(bMsg.document.file_name)}</code>)\` : '';
+        const captionText = bMsg.caption ? \`\\n\\n💬 <b>Подпись:</b>\\n<blockquote>\${escapeHtml(bMsg.caption)}</blockquote>\` : '';
+        const fullCaption = \`\${delegatePrefix}\${header}\\n📁 <b>Файл:</b>\${docName}\${captionText}\`;
+        
+        if (fullCaption.length <= 1024) {
+          await telegram.sendDocument(recipientId, bMsg.document.file_id, {
+            caption: fullCaption,
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, fullCaption, { parse_mode: 'HTML' });
+          await telegram.sendDocument(recipientId, bMsg.document.file_id, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 6. ВИДЕО
+      if (bMsg.video) {
+        const captionText = bMsg.caption ? \`\\n\\n💬 <b>Подпись:</b>\\n<blockquote>\${escapeHtml(bMsg.caption)}</blockquote>\` : '';
+        const fullCaption = \`\${delegatePrefix}\${header}\${captionText}\`;
+        if (fullCaption.length <= 1024) {
+          await telegram.sendVideo(recipientId, bMsg.video.file_id, {
+            caption: fullCaption,
+            parse_mode: 'HTML',
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        } else {
+          await telegram.sendMessage(recipientId, fullCaption, { parse_mode: 'HTML' });
+          await telegram.sendVideo(recipientId, bMsg.video.file_id, {
+            reply_markup: isDelegate ? undefined : shareKeyboard,
+          });
+        }
+        continue;
+      }
+
+      // 7. СТИКЕР
+      if (bMsg.sticker) {
+        const emoji = bMsg.sticker.emoji ? \` (\${bMsg.sticker.emoji})\` : '';
+        await telegram.sendMessage(recipientId, \`\${delegatePrefix}\${header}\\n\\n🏷 <b>Стикер</b>\${emoji}\`, { parse_mode: 'HTML' });
+        await telegram.sendSticker(recipientId, bMsg.sticker.file_id, {
+          reply_markup: isDelegate ? undefined : shareKeyboard,
+        });
+        continue;
+      }
+
+      // Резервный вариант
+      await telegram.sendMessage(recipientId, \`\${delegatePrefix}\${header}\`, {
+        parse_mode: 'HTML',
+        reply_markup: isDelegate ? undefined : shareKeyboard,
+      });
+      if (fromChatId && messageId) {
+        try {
+          await telegram.copyMessage(recipientId, fromChatId, messageId);
+        } catch (copyErr) {
+          console.warn('[FALLBACK_COPY_FAILED]', copyErr?.message || copyErr);
+        }
+      }
+    } catch (sendErr) {
+      console.error(\`[DISPATCH_ERROR_RECIPIENT_\${recipientId}]\`, sendErr?.message || sendErr);
     }
   }
 }
@@ -197,8 +291,9 @@ bot.on('business_connection', async (ctx) => {
         \`✅ Бот успешно подключен к вашим личным диалогам.\\n\\n\` +
         \`🛡 <b>Как теперь работает протоколирование:</b>\\n\` +
         \`• В чатах с вашими собеседниками бот <b>не спамит</b> и не мешает общению.\\n\` +
-        \`• Все входящие сообщения от собеседников и ваши ответы перехватываются и пересылаются <b>СЮДА (в этот диалог с ботом)</b>.\\n\` +
-        \`• К каждому сообщению прикрепляется карточка: <b>Кто написал, Когда написал, ID, Имя, Никнейм</b> и точная копия самого сообщения (текст, голос, фото, документ и др.).\\n\` +
+        \`• Сообщения пересылаются <b>СТРОГО ВАМ (в этот диалог с ботом)</b>.\\n\` +
+        \`• Настроить фильтр (только мои / только клиентов / все): <code>/mode</code>\\n\` +
+        \`• Делиться с доверенными коллегами: <code>/share &lt;ID&gt;</code> и <code>/team</code>\\n\` +
         \`• 0 байт данных сохраняется на сторонних серверах (Stateless).\`,
         { parse_mode: 'HTML' }
       );
@@ -208,35 +303,22 @@ bot.on('business_connection', async (ctx) => {
   }
 });
 
-// 3. Обработка сообщений в чужих ЛС через Telegram Business (собеседник + сам пользователь)
-// Бот отправляет протокол и копию в ЛС ВЛАДЕЛЬЦА С БОТОМ (не засоряя чат собеседника!)
+// 3. Обработка сообщений в чужих ЛС через Telegram Business
 bot.on('business_message', async (ctx) => {
   try {
     const bMsg = ctx.update.business_message;
     if (!bMsg) return;
 
     const businessConnectionId = bMsg.business_connection_id;
-    const fromChat = bMsg.chat;
-    const fromChatId = fromChat?.id;
-    const messageId = bMsg.message_id;
     const sender = bMsg.from;
-    const senderName = sender?.first_name || 'Собеседник';
-
-    // Определяем получателя (ЛС владельца с ботом)
     const targetOwnerId = connectionToOwner.get(businessConnectionId) || lastKnownOwnerId;
-
-    console.log(\`[BUSINESS_MSG_RECV] Conn: \${businessConnectionId}, FromChat: \${fromChatId}, Sender: \${senderName} (ID: \${sender?.id}) -> TargetOwner: \${targetOwnerId}\`);
 
     if (!targetOwnerId) {
       console.warn('[TARGET_OWNER_NOT_FOUND] Владелец не определен. Напишите /start боту в ЛС.');
       return;
     }
 
-    const startTime = Date.now();
     await dispatchBusinessMessage(ctx.telegram, bMsg, targetOwnerId, false);
-
-    const elapsed = Date.now() - startTime;
-    console.log(\`[BUSINESS_MSG_FORWARDED_TO_OWNER] Msg ID \${messageId} forwarded to owner \${targetOwnerId} (\${elapsed}ms). Chat with client kept clean!\`);
   } catch (err) {
     console.error('[BUSINESS_MSG_ERROR]', err?.message || err);
   }
@@ -257,167 +339,83 @@ bot.on('edited_business_message', async (ctx) => {
   }
 });
 
-// 5. Строгий глобальный фильтр для обычных сообщений: Личные сообщения (DM)
-bot.use(async (ctx, next) => {
-  try {
-    // Пропускаем бизнес-обновления
-    if (ctx.update.business_connection || ctx.update.business_message || ctx.update.edited_business_message) {
-      return await next();
-    }
+// 5. Команды управления в личных сообщениях с ботом (/start, /help, /mode, /share, /unshare, /team, /status)
+bot.command(['mode', 'filter'], async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const currentMode = ownerFilterMode.get(userId) || 'all';
 
-    if (!ctx.chat || ctx.chat.type !== 'private') {
-      if (ctx.chat) {
-        console.log(\`[FILTER_DROP] Отклонено сообщение из не-DM чата (Тип: \${ctx.chat.type}, ID: \${ctx.chat.id})\`);
-      }
-      return; // Завершаем выполнение без каких-либо действий
+  return await ctx.replyWithHTML(
+    \`⚙️ <b>Настройка фильтрации бизнес-сообщений:</b>\\n\\n\` +
+    \`Текущий режим: <b>\${currentMode === 'all' ? '💬 Все сообщения' : currentMode === 'my_only' ? '👤 Только мои' : '👥 Только клиентов'}</b>\`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: (currentMode === 'all' ? '✅ ' : '') + '💬 Все сообщения', callback_data: 'set_filter_all' }],
+          [{ text: (currentMode === 'my_only' ? '✅ ' : '') + '👤 Только мои сообщения', callback_data: 'set_filter_my_only' }],
+          [{ text: (currentMode === 'clients_only' ? '✅ ' : '') + '👥 Только от клиентов', callback_data: 'set_filter_clients_only' }],
+        ],
+      },
     }
-    return await next();
-  } catch (err) {
-    console.error('[MIDDLEWARE_ERROR]', err?.message || err);
-  }
+  );
 });
 
-// 6. Команды управления в личных сообщениях с ботом
-bot.start(async (ctx) => {
-  try {
-    const userId = ctx.from?.id;
-    const userName = ctx.from?.first_name || 'пользователь';
-
-    if (userId) {
-      registeredOwners.add(userId);
-      lastKnownOwnerId = userId;
-    }
-
-    return await ctx.replyWithHTML(
-      \`💼 <b>Привет, \${userName}!</b>\\n\\n\` +
-      \`Я — ваш <b>Персональный Секретарь Telegram</b>.\\n\\n\` +
-      \`📌 <b>Как это работает:</b>\\n\` +
-      \`1️⃣ <b>Секретарь в чужих ЛС:</b> Подключите меня в <i>Настройки Telegram → Telegram Business → Чат-боты</i>. Все входящие и исходящие сообщения из ваших диалогов с клиентами/друзьями будут протоколироваться и пересылаться <b>СЮДА (в этот наш диалог)</b>.\\n\` +
-      \`2️⃣ <b>Прямой диалог:</b> Отправьте мне сюда любую заметку или файл — я сохраню точную копию с метаданными.\\n\\n\` +
-      \`🛡 <b>В чатах с собеседниками бот ничего не пишет и не спамит!</b> Все протоколы и копии приходят только вам сюда.\\n\` +
-      \`🔒 <i>Stateless / Zero Data Retention: данные не сохраняются на сторонних серверах.</i>\`
-    );
-  } catch (err) {
-    console.error('[START_CMD_ERROR]', err?.message || err);
+bot.command('share', async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const args = ctx.message.text.split(' ').slice(1).filter(Boolean);
+  if (args.length === 0) {
+    return await ctx.replyWithHTML('Использование: <code>/share &lt;Telegram_ID_коллеги&gt;</code>');
   }
+  const targetId = parseInt(args[0], 10);
+  if (isNaN(targetId)) return await ctx.reply('❌ Укажите корректный числовой ID.');
+  
+  if (!ownerDelegates.has(userId)) ownerDelegates.set(userId, new Set());
+  ownerDelegates.get(userId).add(targetId);
+  return await ctx.replyWithHTML(\`✅ Коллега <code>\${targetId}</code> добавлен в список доверенных получателей.\`);
 });
 
-bot.help(async (ctx) => {
-  try {
-    return await ctx.replyWithHTML(
-      \`ℹ️ <b>Справка Персонального Секретаря:</b>\\n\\n\` +
-      \`💼 <b>Как подключить к чужим ЛС через Telegram Business:</b>\\n\` +
-      \`1. Откройте <b>Настройки Telegram</b> (требуется Telegram Premium / Business).\\n\` +
-      \`2. Перейдите в <b>Telegram для бизнеса → Чат-боты</b>.\\n\` +
-      \`3. Введите юзернейм этого бота и включите доступ к личным чатам.\\n\` +
-      \`4. Все сообщения из ваших личных диалогов будут мгновенно протоколироваться и дублироваться <b>в этот чат с ботом</b>.\\n\\n\` +
-      \`⚙️ Команды: /start, /help, /status\`
-    );
-  } catch (err) {
-    console.error('[HELP_CMD_ERROR]', err?.message || err);
+bot.command('unshare', async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const args = ctx.message.text.split(' ').slice(1).filter(Boolean);
+  const targetId = parseInt(args[0], 10);
+  const delegates = ownerDelegates.get(userId);
+  if (delegates && delegates.has(targetId)) {
+    delegates.delete(targetId);
+    return await ctx.replyWithHTML(\`✅ Пользователь <code>\${targetId}</code> удален из списка.\`);
   }
+  return await ctx.replyWithHTML(\`ℹ️ Пользователь <code>\${targetId}</code> не найден в списке.\`);
 });
 
-bot.command('status', async (ctx) => {
-  try {
-    return await ctx.replyWithHTML(
-      \`⚡ <b>Статус:</b> Секретарь активен (Онлайн)\\n\` +
-      \`🛡 <b>Режим:</b> Private DM + Telegram Business Forwarder\\n\` +
-      \`📥 <b>Куда приходят логи:</b> В этот личный чат с ботом\\n\` +
-      \`🧠 <b>Хранилище (State):</b> 0 KB (Stateless / Zero Data Retention)\\n\` +
-      \`⏱ <b>Uptime:</b> \${process.uptime().toFixed(1)} сек.\\n\` +
-      \`📦 <b>Node.js:</b> \${process.version}\`
-    );
-  } catch (err) {
-    console.error('[STATUS_CMD_ERROR]', err?.message || err);
+bot.command('team', async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  const delegates = ownerDelegates.get(userId);
+  if (!delegates || delegates.size === 0) {
+    return await ctx.replyWithHTML('👥 Список доверенных коллег пуст. Добавьте: <code>/share &lt;ID&gt;</code>');
   }
+  const listStr = Array.from(delegates).map((id, idx) => \`\${idx + 1}. 🆔 <code>\${id}</code>\`).join('\\n');
+  return await ctx.replyWithHTML(\`👥 <b>Доверенные получатели (\${delegates.size} чел.):</b>\\n\\n\${listStr}\`);
 });
 
-// 7. Основной обработчик: Моментальное копирование любого прямого сообщения в ЛС с ботом
-bot.on('message', async (ctx) => {
-  try {
-    const message = ctx.message;
-    if (!message) return;
-
-    // Игнорируем системные слэш-команды (/start, /help, /status)
-    if (message.text && message.text.startsWith('/')) {
-      return;
-    }
-
-    const chatId = ctx.chat.id;
-    const messageId = message.message_id;
-    const sender = message.from;
-    const startTime = Date.now();
-
-    if (sender?.id) {
-      registeredOwners.add(sender.id);
-      lastKnownOwnerId = sender.id;
-    }
-
-    const header = formatMetadataHeader(sender, message.date, null, false);
-
-    // 1. Отправляем детальную карточку-подпись в чат с ботом
-    await ctx.replyWithHTML(header);
-
-    // 2. Нативное копирование сообщения в тот же чат (сохраняет форматирование, медиа, подписи, стикеры)
-    await ctx.telegram.copyMessage(chatId, chatId, messageId);
-
-    const elapsed = Date.now() - startTime;
-    console.log(\`[DM_COPIED] Сообщение ID \${messageId} продублировано в чат с метаданными за \${elapsed}ms. Память очищена.\`);
-  } catch (err) {
-    console.error(\`[DM_COPY_ERROR] Сбой копирования сообщения:\`, err?.message || err);
-  }
-});
-
-// 8. Экспорт бессерверного обработчика Webhook (Vercel Serverless Function)
+// Экспорт бессерверного обработчика Webhook (Vercel Serverless Function)
 export default async function handler(req, res) {
-  // 1. Обработка GET-запросов (проверка статуса в браузере или мониторинге)
   if (req.method === 'GET') {
-    return res.status(200).json({
-      status: 'ok',
-      service: 'Personal Secretary Telegram Bot (Business Forwarder to Bot DM)',
-      stateless: true,
-      business_support: true,
-      ready: true,
-      timestamp: new Date().toISOString(),
-      uptime_seconds: process.uptime(),
-      message: 'Telegram Webhook endpoint is active. Messages are forwarded into user DM with bot.'
-    });
+    return res.status(200).json({ status: 'ok', service: 'Personal Secretary Bot', stateless: true });
   }
-
-  // 2. Обработка POST-запросов от Telegram Webhook
   if (req.method === 'POST') {
     try {
-      let update = req.body;
-
-      // Безопасный парсинг body (если пришла строка)
-      if (typeof update === 'string') {
-        try {
-          update = JSON.parse(update);
-        } catch (parseErr) {
-          console.warn('[JSON_PARSE_WARNING] Failed to parse request body as JSON');
-          update = null;
-        }
-      }
-
-      if (update && typeof update === 'object') {
-        await bot.handleUpdate(update);
-      }
+      const update = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+      if (update) await bot.handleUpdate(update);
     } catch (err) {
       console.error('[WEBHOOK_ERROR]', err?.message || err);
     } finally {
-      // МГНОВЕННЫЙ ACK: Всегда возвращаем HTTP 200 OK Telegram серверу
-      if (!res.headersSent) {
-        res.status(200).end();
-      }
+      if (!res.headersSent) res.status(200).end();
     }
     return;
   }
-
-  // Для остальных методов (OPTIONS, HEAD и т.д.)
-  if (!res.headersSent) {
-    res.status(200).end();
-  }
+  if (!res.headersSent) res.status(200).end();
 }`
   },
   {
