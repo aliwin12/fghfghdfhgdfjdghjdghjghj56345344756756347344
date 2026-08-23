@@ -3,7 +3,12 @@ import { Globe, Link2, Copy, Check, ExternalLink, RefreshCw, Send, CheckCircle2,
 import { BOT_TOKEN, DEFAULT_APP_DOMAIN } from '../data/botFiles';
 
 export const WebhookManager: React.FC = () => {
-  const [domain, setDomain] = useState<string>(DEFAULT_APP_DOMAIN);
+  const [domain, setDomain] = useState<string>(() => {
+    if (typeof window !== 'undefined' && window.location.host && !window.location.host.includes('localhost')) {
+      return window.location.host;
+    }
+    return DEFAULT_APP_DOMAIN;
+  });
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ status: 'idle' | 'loading' | 'success' | 'error'; message: string; raw?: any }>({
     status: 'idle',
@@ -21,6 +26,24 @@ export const WebhookManager: React.FC = () => {
     navigator.clipboard.writeText(text);
     setCopiedKey(key);
     setTimeout(() => setCopiedKey(null), 2000);
+  };
+
+  const handleTestLocalEndpoint = async () => {
+    setTestResult({ status: 'loading', message: 'Проверка эндпоинта /api/bot на текущем сервере...' });
+    try {
+      const response = await fetch('/api/bot');
+      const data = await response.json();
+      setTestResult({
+        status: 'success',
+        message: `Локальный эндпоинт /api/bot активен и готов принимать запросы Webhook! (HTTP ${response.status})`,
+        raw: data,
+      });
+    } catch (err: any) {
+      setTestResult({
+        status: 'error',
+        message: `Ошибка при обращении к /api/bot: ${err.message}`,
+      });
+    }
   };
 
   const handleTestPing = async (apiUrl: string, label: string) => {
@@ -88,9 +111,18 @@ export const WebhookManager: React.FC = () => {
                 className="w-full pl-20 pr-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
               />
             </div>
-            <p className="text-[11px] text-slate-500 mt-1.5">
-              Пример: <code className="text-slate-400">universal-logger-bot.app</code> или ваш кастомный домен.
-            </p>
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                onClick={() => {
+                  if (typeof window !== 'undefined' && window.location.host) {
+                    setDomain(window.location.host);
+                  }
+                }}
+                className="text-[11px] text-blue-400 hover:text-blue-300 underline flex items-center gap-1"
+              >
+                <span>Подставить текущий домен приложения ({typeof window !== 'undefined' ? window.location.host : ''})</span>
+              </button>
+            </div>
           </div>
 
           <div>
@@ -112,9 +144,18 @@ export const WebhookManager: React.FC = () => {
                 {copiedKey === 'webhookUrl' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
               </button>
             </div>
-            <p className="text-[11px] text-slate-500 mt-1.5">
-              Этот адрес обрабатывается функцией <code className="text-slate-400">api/bot.js</code>.
-            </p>
+            <div className="flex items-center justify-between mt-2">
+              <p className="text-[11px] text-slate-500">
+                Обрабатывается маршрутом <code className="text-slate-400">/api/bot</code>.
+              </p>
+              <button
+                onClick={handleTestLocalEndpoint}
+                className="text-[11px] text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1"
+              >
+                <CheckCircle2 className="w-3 h-3" />
+                <span>Проверить локальный /api/bot</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -136,7 +177,7 @@ export const WebhookManager: React.FC = () => {
               </span>
             </div>
             <p className="text-xs text-slate-400 mb-3">
-              Регистрирует ваш домен в Telegram. Все события групп начнут поступать на ваш сервер.
+              Регистрирует ваш домен в Telegram. Все личные сообщения начнут поступать боту-секретарю.
             </p>
             <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 text-[11px] font-mono text-slate-300 break-all mb-4 select-all">
               {setWebhookUrl}
