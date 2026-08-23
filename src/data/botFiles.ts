@@ -8,14 +8,14 @@ export const BOT_FILES: CodeFile[] = [
     name: 'api/bot.js',
     path: 'api/bot.js',
     language: 'javascript',
-    description: 'Главная Serverless-функция персонального секретаря. Работает только в личных сообщениях, моментально копирует любые входящие сообщения и сразу завершает выполнение без сохранения данных.',
+    description: 'Главная Serverless-функция персонального секретаря. Строго фильтрует только личные сообщения (DM), мгновенно подтверждает вебхук Telegram и сразу освобождает память без сохранения данных.',
     content: `// api/bot.js
-// Персональный секретарь для личных сообщений (Stateless Message Mirror)
-// Работает на библиотеке Telegraf без сохранения истории (Zero Data Retention)
+// Персональный секретарь для личных сообщений (Stateless DM Mirror)
+// Архитектура: Zero-Retention / Без сохранения состояния (Stateless)
 
 const { Telegraf } = require('telegraf');
 
-// 1. Инициализация экземпляра бота вне хендлера (Global Scope) для минимизации задержек
+// 1. Инициализация экземпляра бота в Global Scope для минимизации Cold Starts
 const BOT_TOKEN = process.env.BOT_TOKEN || '${BOT_TOKEN}';
 
 if (!BOT_TOKEN) {
@@ -24,99 +24,96 @@ if (!BOT_TOKEN) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// 2. Команды управления персональным секретарём в личных сообщениях
-bot.start(async (ctx) => {
-  // Работаем строго только в личных сообщениях
-  if (ctx.chat.type !== 'private') {
-    return;
+// 2. Строгий глобальный фильтр: Обрабатываем ИСКЛЮЧИТЕЛЬНО личные сообщения (DM)
+bot.use(async (ctx, next) => {
+  // Если обновление не относится к личному чату (группа, супергруппа, канал), немедленно отсекаем
+  if (!ctx.chat || ctx.chat.type !== 'private') {
+    if (ctx.chat) {
+      console.log(\`[FILTER_DROP] Отклонено сообщение из не-DM чата (Тип: \${ctx.chat.type}, ID: \${ctx.chat.id})\`);
+    }
+    return; // Завершаем выполнение без каких-либо действий
   }
+  return next();
+});
 
+// 3. Команды управления в личных сообщениях
+bot.start(async (ctx) => {
   return ctx.replyWithHTML(
-    \`💼 <b>Привет, \${ctx.from.first_name || 'пользователь'}!</b>\\n\\n\` +
+    \`💼 <b>Привет, \${ctx.from?.first_name || 'пользователь'}!</b>\\n\\n\` +
     \`Я — ваш <b>Персональный Секретарь</b> для личных сообщений.\\n\\n\` +
-    \`📌 <b>Как я работаю:</b>\\n\` +
-    \`• Отправьте мне любой текст, заметку, фото, документ, голосовое сообщение или медиафайл.\\n\` +
-    \`• Я <b>моментально создам точную копию</b> вашего сообщения в этом чате.\\n\` +
-    \`• Копия останется в вашей ленте чата, а сам я <b>моментально забуду</b> о ней (Stateless / 0% сохранения данных на сервере).\\n\\n\` +
-    \`🔒 <i>Полная конфиденциальность: сообщения не логируются и не сохраняются в базе данных.</i>\`
+    \`📌 <b>Принцип работы:</b>\\n\` +
+    \`• Отправьте любой текст, фото, документ, голосовое сообщение или медиафайл.\\n\` +
+    \`• Я <b>моментально создам точную копию</b> сообщения в этом диалоге.\\n\` +
+    \`• Копия навсегда останется в вашей истории чата Telegram.\\n\` +
+    \`• Сам бот <b>моментально забудет</b> о сообщении (Stateless / 0 байт данных на сервере).\\n\\n\` +
+    \`🔒 <i>100% Конфиденциальность: данные не логируются и не сохраняются в базе данных.</i>\`
   );
 });
 
 bot.help(async (ctx) => {
-  if (ctx.chat.type !== 'private') return;
-
   return ctx.replyWithHTML(
     \`ℹ️ <b>Справка Персонального Секретаря:</b>\\n\\n\` +
-    \`1. Отправьте любое входящее сообщение: текст, фото, видео, кружочек, аудио, файл или стикер.\\n\` +
+    \`1. Отправьте любое входящее сообщение: текст, фото, видео, кружок, аудио, файл или стикер.\\n\` +
     \`2. Бот выполнит нативное дублирование (<code>copyMessage</code>).\\n\` +
     \`3. Созданная копия останется в диалоге Telegram навсегда.\\n\` +
-    \`4. Сам бот не хранит базы данных и сразу освобождает память.\\n\\n\` +
-    \`⚙️ Команды: /start, /help, /status\`
+    \`4. Сервер не сохраняет базу данных и сразу освобождает память.\\n\\n\` +
+    \`⚙️ Доступные команды: /start, /help, /status\`
   );
 });
 
 bot.command('status', async (ctx) => {
-  if (ctx.chat.type !== 'private') return;
-
   return ctx.replyWithHTML(
-    \`⚡ <b>Статус Секретаря:</b> Активен (Онлайн)\\n\` +
-    \`🛡 <b>Режим:</b> Личные сообщения (Private DM Only)\\n\` +
-    \`🧠 <b>Память (State):</b> 0 KB (Stateless / Zero-Retention)\\n\` +
-    \`⏱ <b>Uptime экземпляра:</b> \${process.uptime().toFixed(1)} сек.\\n\` +
-    \`📦 <b>Среда:</b> Node.js \${process.version}\`
+    \`⚡ <b>Статус:</b> Секретарь активен (Онлайн)\\n\` +
+    \`🛡 <b>Режим фильтрации:</b> Строго Private DM (Личные сообщения)\\n\` +
+    \`🧠 <b>Хранилище (State):</b> 0 KB (Stateless / Zero Data Retention)\\n\` +
+    \`⏱ <b>Uptime:</b> \${process.uptime().toFixed(1)} сек.\\n\` +
+    \`📦 <b>Node.js:</b> \${process.version}\`
   );
 });
 
-// 3. Главный обработчик личных сообщений: Моментальное копирование без сохранения
+// 4. Основной обработчик: Моментальное копирование любого личного сообщения
 bot.on('message', async (ctx) => {
-  const chat = ctx.chat;
   const message = ctx.message;
+  if (!message) return;
 
-  // Игнорируем групповые чаты и каналы — бот работает ТОЛЬКО как секретарь в личных сообщениях
-  if (chat.type !== 'private') {
-    console.log(\`[IGNORED_GROUP] Сообщение из группы ID \${chat.id} проигнорировано (Секретарь работает только в ЛС)\`);
-    return;
-  }
-
-  // Игнорируем системные команды, чтобы не дублировать /start или /status повторно
+  // Игнорируем системные слэш-команды (/start, /help, /status), чтобы не дублировать их
   if (message.text && message.text.startsWith('/')) {
     return;
   }
 
-  const userId = ctx.from.id;
+  const chatId = ctx.chat.id;
   const messageId = message.message_id;
   const startTime = Date.now();
 
-  console.log(\`[SECRETARY_RECV] Получено личное сообщение msg_id: \${messageId} от пользователя \${userId}\`);
-
   try {
-    // Выполняем точное нативное копирование сообщения в тот же чат
-    // Метод copyMessage сохраняет все типы медиа, форматирование текста, подписи и стикеры
-    await ctx.telegram.copyMessage(chat.id, chat.id, messageId);
+    // Нативное копирование сообщения в тот же чат (сохраняет форматирование, медиа, подписи, стикеры)
+    await ctx.telegram.copyMessage(chatId, chatId, messageId);
 
     const elapsed = Date.now() - startTime;
-    console.log(\`[SECRETARY_COPIED] Сообщение \${messageId} продублировано в чат за \${elapsed}ms. Память очищена (Stateless).\`);
+    console.log(\`[DM_COPIED] Сообщение ID \${messageId} продублировано в чат за \${elapsed}ms. Память очищена.\`);
   } catch (err) {
-    console.error(\`[SECRETARY_ERROR] Не удалось скопировать сообщение \${messageId}: \${err.message}\`);
+    console.error(\`[DM_COPY_ERROR] Сбой копирования сообщения ID \${messageId}: \${err.message}\`);
   }
-  // Переменные message и контекст уничтожаются при завершении функции — бот моментально забывает сообщение
+  // Контекст и сообщение сразу выходят из области видимости и освобождаются сборщиком мусора
 });
 
-// 4. Экспорт бессерверного обработчика Webhook (Serverless Handler)
+// 5. Экспорт бессерверного обработчика Webhook (Serverless Function Handler)
 module.exports = async (req, res) => {
-  // Telegram Webhook отправляет обновления строго методом POST
+  // Telegram Webhook всегда отправляет обновления методом POST
   if (req.method !== 'POST') {
-    return res.status(200).send('Personal Secretary Telegram Bot is Running (Stateless)!');
+    return res.status(200).send('Personal Secretary Telegram Bot (Stateless DM Mirror) is Running!');
   }
 
   try {
     if (req.body && typeof req.body === 'object') {
+      // Обработка входящего обновления Telegraf
       await bot.handleUpdate(req.body);
     }
   } catch (err) {
-    console.error('[WEBHOOK_HANDLE_ERROR]', err);
+    console.error('[WEBHOOK_ERROR]', err);
   } finally {
-    // Всегда возвращаем HTTP 200 OK Telegram серверу для подтверждения
+    // МГНОВЕННЫЙ ACK: Всегда возвращаем HTTP 200 OK Telegram серверу для подтверждения доставки
+    // Завершает выполнение Serverless-функции и гарантирует отсутствие утечек памяти
     res.status(200).end();
   }
 };
