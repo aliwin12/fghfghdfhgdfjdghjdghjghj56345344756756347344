@@ -21,6 +21,25 @@ const greetedPrivateChats = new Set<number>();
 // Cache of announced business chats to display the notice about bot managing the chat
 const announcedBusinessChats = new Set<string>();
 
+// Helper to format metadata header
+function formatMetadataHeader(from: any, dateUnix?: number) {
+  const date = dateUnix ? new Date(dateUnix * 1000) : new Date();
+  const timeStr = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Europe/Moscow' });
+  const dateStr = date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Moscow' });
+
+  const fullName = [from?.first_name, from?.last_name].filter(Boolean).join(' ') || 'Аноним';
+  const username = from?.username ? `@${from.username}` : 'нет никнейма';
+  const userId = from?.id || '—';
+
+  return (
+    `📋 <b>[СЕКРЕТАРЬ • ПРОТОКОЛ СООБЩЕНИЯ]</b>\n` +
+    `👤 <b>Отправитель:</b> ${fullName}\n` +
+    `🔖 <b>Никнейм:</b> ${username}\n` +
+    `🆔 <b>ID:</b> <code>${userId}</code>\n` +
+    `📅 <b>Дата и время:</b> ${dateStr} ${timeStr} (МСК)`
+  );
+}
+
 // 1. Handle Telegram Business Connection updates
 bot.on('business_connection' as any, async (ctx: any) => {
   try {
@@ -38,8 +57,8 @@ bot.on('business_connection' as any, async (ctx: any) => {
         `✅ Бот подключен к вашему личному аккаунту Telegram.\n\n` +
         `🛡 <b>Как это работает в чужих ЛС:</b>\n` +
         `• Когда вам пишет собеседник или когда вы отвечаете ему — бот дублирует (копирует) сообщение.\n` +
+        `• Каждая копия сопровождается карточкой: <b>Кто написал, Когда написал, ID, Имя и Никнейм</b>.\n` +
         `• В диалоге будет зафиксировано, что этим чатом управляет Персональный Секретарь.\n` +
-        `• Все сообщения остаются в вашей истории чатов.\n` +
         `• 0 байт данных сохраняется на сервере (Stateless / Zero Retention).`
         , { parse_mode: 'HTML' }
       );
@@ -60,7 +79,6 @@ bot.on('business_message' as any, async (ctx: any) => {
     const messageId = bMsg.message_id;
     const sender = bMsg.from;
     const senderName = sender?.first_name || 'Собеседник';
-    const isUserHimself = bMsg.sender_business_bot ? true : false;
 
     console.log(`[BUSINESS_MSG_RECV] Conn: ${businessConnectionId}, Chat: ${chatId}, From: ${senderName} (ID: ${sender?.id})`);
 
@@ -87,13 +105,21 @@ bot.on('business_message' as any, async (ctx: any) => {
       return;
     }
 
-    // Моментальное нативное копирование сообщения собеседника или владельца в этот же бизнес-чат
+    const header = formatMetadataHeader(sender, bMsg.date);
     const startTime = Date.now();
+
+    // 1. Отправляем информационную подпись с деталями автора
+    await (ctx.telegram as any).sendMessage(chatId, header, {
+      business_connection_id: businessConnectionId,
+      parse_mode: 'HTML',
+    });
+
+    // 2. Моментальное нативное копирование сообщения в этот же бизнес-чат
     await (ctx.telegram as any).copyMessage(chatId, chatId, messageId, {
       business_connection_id: businessConnectionId,
     });
     const elapsed = Date.now() - startTime;
-    console.log(`[BUSINESS_MSG_COPIED] Message ID ${messageId} copied in business chat ${chatId} (${elapsed}ms). Memory purged.`);
+    console.log(`[BUSINESS_MSG_COPIED] Message ID ${messageId} copied with metadata in business chat ${chatId} (${elapsed}ms). Memory purged.`);
   } catch (err: any) {
     console.error('[BUSINESS_MSG_ERROR]', err?.message || err);
   }
@@ -107,8 +133,16 @@ bot.on('edited_business_message' as any, async (ctx: any) => {
     const businessConnectionId = bMsg.business_connection_id;
     const chatId = bMsg.chat?.id;
     const messageId = bMsg.message_id;
+    const sender = bMsg.from;
 
     console.log(`[BUSINESS_MSG_EDITED] Chat: ${chatId}, Msg ID: ${messageId}`);
+    
+    const header = `✏️ <b>[ИЗМЕНЕНО СООБЩЕНИЕ]</b>\n` + formatMetadataHeader(sender, bMsg.edit_date || bMsg.date);
+    await (ctx.telegram as any).sendMessage(chatId, header, {
+      business_connection_id: businessConnectionId,
+      parse_mode: 'HTML',
+    });
+
     // Дублируем обновленную версию сообщения
     await (ctx.telegram as any).copyMessage(chatId, chatId, messageId, {
       business_connection_id: businessConnectionId,
@@ -185,19 +219,25 @@ bot.on('message', async (ctx) => {
 
   const chatId = ctx.chat.id;
   const messageId = message.message_id;
+  const sender = message.from;
   const startTime = Date.now();
 
   try {
     // Если пользователь впервые пишет в ЛС боту, можно вывести плашку
     if (!greetedPrivateChats.has(chatId)) {
       greetedPrivateChats.add(chatId);
-      await ctx.replyWithHTML(`🤖 <i>Этим чатом управляет Персональный Секретарь. Копирую сообщение...</i>`);
+      await ctx.replyWithHTML(`🤖 <i>Этим чатом управляет Персональный Секретарь. Протоколирую сообщение...</i>`);
     }
 
-    // Native copyMessage preserves all media formats, captions, formatting, and stickers
+    const header = formatMetadataHeader(sender, message.date);
+
+    // 1. Отправляем детальную карточку-подпись
+    await ctx.replyWithHTML(header);
+
+    // 2. Native copyMessage preserves all media formats, captions, formatting, and stickers
     await ctx.telegram.copyMessage(chatId, chatId, messageId);
     const elapsed = Date.now() - startTime;
-    console.log(`[DM_COPIED] Message ID ${messageId} mirrored in ${elapsed}ms. State purged.`);
+    console.log(`[DM_COPIED] Message ID ${messageId} mirrored with metadata in ${elapsed}ms. State purged.`);
   } catch (err: any) {
     console.error(`[DM_COPY_ERROR] Failed to mirror message ID ${messageId}:`, err?.message || err);
   }

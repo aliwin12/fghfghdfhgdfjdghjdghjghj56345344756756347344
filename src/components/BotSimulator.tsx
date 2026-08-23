@@ -1,21 +1,29 @@
 import React, { useState } from 'react';
-import { Send, Bot, User, CheckCircle, Clock, Zap, ArrowRight, Shield, RefreshCw, Copy, Trash2, FileText, Image, Mic, Briefcase, UserCheck } from 'lucide-react';
+import { Send, Bot, User, CheckCircle, Clock, Zap, ArrowRight, Shield, RefreshCw, Copy, Trash2, FileText, Image, Mic, Briefcase, UserCheck, Tag, Calendar, AtSign, Hash } from 'lucide-react';
 
 export const BotSimulator: React.FC = () => {
   const [mode, setMode] = useState<'business' | 'direct'>('business');
   const [userName, setUserName] = useState('Владимир');
-  const [interlocutorName, setInterlocutorName] = useState('Алексей (Клиент)');
+  const [userHandle, setUserHandle] = useState('vladimir_ceo');
+  const [userId, setUserId] = useState('849201948');
+
+  const [interlocutorName, setInterlocutorName] = useState('Алексей Смирнов');
+  const [interlocutorHandle, setInterlocutorHandle] = useState('alex_client');
+  const [interlocutorId, setInterlocutorId] = useState('512940182');
+
   const [currentSender, setCurrentSender] = useState<'interlocutor' | 'user'>('interlocutor');
   const [messageType, setMessageType] = useState<'text' | 'photo' | 'document' | 'voice'>('text');
   const [messageText, setMessageText] = useState('Здравствуйте! Отправляю коммерческое предложение по проекту.');
 
   const [chatHistory, setChatHistory] = useState<Array<{
     id: number;
-    sender: 'interlocutor' | 'user' | 'bot_notice' | 'bot_copy_interlocutor' | 'bot_copy_user';
-    type: 'text' | 'photo' | 'document' | 'voice' | 'system';
+    sender: 'interlocutor' | 'user' | 'bot_notice' | 'bot_metadata' | 'bot_copy_interlocutor' | 'bot_copy_user';
+    type: 'text' | 'photo' | 'document' | 'voice' | 'system' | 'metadata';
     content: string;
     caption?: string;
     senderName?: string;
+    senderHandle?: string;
+    senderId?: string;
     timestamp: string;
   }>>([
     {
@@ -30,32 +38,28 @@ export const BotSimulator: React.FC = () => {
       sender: 'interlocutor',
       type: 'text',
       content: 'Владимир, добрый день! Согласовали договор с юристами.',
-      senderName: 'Алексей (Клиент)',
+      senderName: 'Алексей Смирнов',
+      senderHandle: 'alex_client',
+      senderId: '512940182',
       timestamp: '14:20',
     },
     {
       id: 3,
-      sender: 'bot_copy_interlocutor',
-      type: 'text',
-      content: 'Владимир, добрый день! Согласовали договор с юристами.',
-      senderName: 'Алексей (Клиент)',
+      sender: 'bot_metadata',
+      type: 'metadata',
+      content: '📋 ПРОТОКОЛ СООБЩЕНИЯ',
+      senderName: 'Алексей Смирнов',
+      senderHandle: 'alex_client',
+      senderId: '512940182',
       timestamp: '14:20',
     },
     {
       id: 4,
-      sender: 'user',
+      sender: 'bot_copy_interlocutor',
       type: 'text',
-      content: 'Отлично, высылаю подписанную копию!',
-      senderName: 'Вы (Владимир)',
-      timestamp: '14:21',
-    },
-    {
-      id: 5,
-      sender: 'bot_copy_user',
-      type: 'text',
-      content: 'Отлично, высылаю подписанную копию!',
-      senderName: 'Вы (Владимир)',
-      timestamp: '14:21',
+      content: 'Владимир, добрый день! Согласовали договор с юристами.',
+      senderName: 'Алексей Смирнов',
+      timestamp: '14:20',
     },
   ]);
 
@@ -69,7 +73,11 @@ export const BotSimulator: React.FC = () => {
     const now = new Date();
     const timeStr = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
     const newMsgId = Date.now();
-    const activeSenderName = currentSender === 'interlocutor' ? interlocutorName : `Вы (${userName})`;
+    
+    const isInterlocutor = currentSender === 'interlocutor';
+    const activeSenderName = isInterlocutor ? interlocutorName : userName;
+    const activeSenderHandle = isInterlocutor ? interlocutorHandle : userHandle;
+    const activeSenderId = isInterlocutor ? interlocutorId : userId;
 
     // Step 1: Add original message
     const origMsg = {
@@ -78,7 +86,9 @@ export const BotSimulator: React.FC = () => {
       type: messageType,
       content: messageText,
       caption: messageType === 'photo' ? messageText : undefined,
-      senderName: activeSenderName,
+      senderName: isInterlocutor ? interlocutorName : `Вы (${userName})`,
+      senderHandle: activeSenderHandle,
+      senderId: activeSenderId,
       timestamp: timeStr,
     };
 
@@ -89,27 +99,39 @@ export const BotSimulator: React.FC = () => {
     setTimeout(() => {
       setLogs((prev) => [
         ...prev,
-        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [TELEGRAM_BUSINESS_UPDATE] Update: business_message (chat: 749102, sender: "${activeSenderName}")`,
+        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [TELEGRAM_UPDATE] Update: business_message (chat: 749102, sender: "${activeSenderName}", ID: ${activeSenderId}, @${activeSenderHandle})`,
       ]);
-    }, 120);
+    }, 100);
 
-    // Telemetry Step 2
+    // Telemetry Step 2: Metadata Protocol Card
     setTimeout(() => {
+      const metaMsg = {
+        id: newMsgId + 1,
+        sender: 'bot_metadata' as const,
+        type: 'metadata' as const,
+        content: '📋 ПРОТОКОЛ СООБЩЕНИЯ',
+        senderName: activeSenderName,
+        senderHandle: activeSenderHandle,
+        senderId: activeSenderId,
+        timestamp: timeStr,
+      };
+
+      setChatHistory((prev) => [...prev, metaMsg]);
       setLogs((prev) => [
         ...prev,
-        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [SECRETARY_COPY] copyMessage(chat_id, chat_id, ${newMsgId}, { business_connection_id: "bc_9410" })`,
+        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [PROTOCOL_HEADER] Отправлена карточка: Отправитель: "${activeSenderName}", Никнейм: "@${activeSenderHandle}", ID: ${activeSenderId}`,
       ]);
-    }, 280);
+    }, 250);
 
-    // Telemetry Step 3
+    // Telemetry Step 3: copyMessage execution
     setTimeout(() => {
       const copyMsg = {
-        id: newMsgId + 1,
-        sender: currentSender === 'interlocutor' ? ('bot_copy_interlocutor' as const) : ('bot_copy_user' as const),
+        id: newMsgId + 2,
+        sender: isInterlocutor ? ('bot_copy_interlocutor' as const) : ('bot_copy_user' as const),
         type: messageType,
         content: messageText,
         caption: messageType === 'photo' ? messageText : undefined,
-        senderName: activeSenderName,
+        senderName: isInterlocutor ? interlocutorName : `Вы (${userName})`,
         timestamp: timeStr,
       };
 
@@ -117,12 +139,12 @@ export const BotSimulator: React.FC = () => {
 
       setLogs((prev) => [
         ...prev,
-        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [MESSAGE_COPIED] Сообщение ${currentSender === 'interlocutor' ? 'собеседника' : 'пользователя'} успешно скопировано в чат.`,
+        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [SECRETARY_COPY] copyMessage(chat_id, chat_id, ${newMsgId}) -> Точная копия в чате.`,
         `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [STATELESS_PURGE] Память сервера очищена (0 байт в БД). Сообщение зафиксировано в Telegram.`,
         `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [HTTP_200_OK] Webhook ACK отправлен за 16ms.`,
       ]);
       setIsSimulating(false);
-    }, 500);
+    }, 480);
   };
 
   const clearChat = () => {
@@ -146,10 +168,10 @@ export const BotSimulator: React.FC = () => {
           <div>
             <h2 className="text-lg font-bold text-white flex items-center gap-2">
               <Briefcase className="w-5 h-5 text-blue-400" />
-              Интерактивный симулятор: Режим Секретаря в чужих ЛС
+              Интерактивный симулятор: Секретарь с полной подписью автора
             </h2>
             <p className="text-xs text-slate-400 mt-1">
-              Бот в режиме Telegram Business перехватывает сообщения собеседника и самого пользователя, протоколирует их с пометкой управления чатом и моментально копирует.
+              Бот перехватывает сообщения, подписывает <b>Кто написал, Когда написал, ID, Имя и Никнейм</b> и сразу прикрепляет точную копию сообщения.
             </p>
           </div>
           <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 self-start sm:self-auto">
@@ -183,7 +205,7 @@ export const BotSimulator: React.FC = () => {
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
               <Zap className="w-4 h-4 text-amber-400" />
-              1. Выбор отправителя и текста
+              1. Данные автора и текст
             </h3>
             <span className="text-[10px] text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
               {mode === 'business' ? 'Telegram Business Режим' : 'Прямой DM'}
@@ -219,26 +241,80 @@ export const BotSimulator: React.FC = () => {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">Имя собеседника</label>
-              <input
-                type="text"
-                value={interlocutorName}
-                onChange={(e) => setInterlocutorName(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none"
-              />
+          {/* Details of Interlocutor / User */}
+          {currentSender === 'interlocutor' ? (
+            <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800 space-y-2">
+              <div className="text-[11px] font-semibold text-amber-400 flex items-center gap-1.5">
+                <User className="w-3.5 h-3.5" />
+                <span>Метаданные Собеседника (Клиента):</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-0.5">Имя и Фамилия</label>
+                  <input
+                    type="text"
+                    value={interlocutorName}
+                    onChange={(e) => setInterlocutorName(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs font-medium focus:ring-1 focus:ring-amber-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-0.5">Никнейм (@username)</label>
+                  <input
+                    type="text"
+                    value={interlocutorHandle}
+                    onChange={(e) => setInterlocutorHandle(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs font-medium focus:ring-1 focus:ring-amber-500 focus:outline-none"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-[10px] text-slate-400 mb-0.5">Telegram ID</label>
+                  <input
+                    type="text"
+                    value={interlocutorId}
+                    onChange={(e) => setInterlocutorId(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs font-mono text-slate-300 focus:ring-1 focus:ring-amber-500 focus:outline-none"
+                  />
+                </div>
+              </div>
             </div>
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">Ваше имя</label>
-              <input
-                type="text"
-                value={userName}
-                onChange={(e) => setUserName(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none"
-              />
+          ) : (
+            <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800 space-y-2">
+              <div className="text-[11px] font-semibold text-blue-400 flex items-center gap-1.5">
+                <UserCheck className="w-3.5 h-3.5" />
+                <span>Ваши метаданные (Владельца):</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-0.5">Имя и Фамилия</label>
+                  <input
+                    type="text"
+                    value={userName}
+                    onChange={(e) => setUserName(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-0.5">Никнейм (@username)</label>
+                  <input
+                    type="text"
+                    value={userHandle}
+                    onChange={(e) => setUserHandle(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-[10px] text-slate-400 mb-0.5">Telegram ID</label>
+                  <input
+                    type="text"
+                    value={userId}
+                    onChange={(e) => setUserId(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs font-mono text-slate-300 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+              </div>
             </div>
-          </div>
+          )}
 
           <div>
             <label className="block text-xs text-slate-400 mb-1">Тип вложения / сообщения</label>
@@ -290,12 +366,12 @@ export const BotSimulator: React.FC = () => {
               {isSimulating ? (
                 <>
                   <RefreshCw className="w-4 h-4 animate-spin" />
-                  <span>Протоколирование и копирование...</span>
+                  <span>Протоколирование с подписью автора...</span>
                 </>
               ) : (
                 <>
                   <Send className="w-4 h-4" />
-                  <span>Отправить от имени: {currentSender === 'interlocutor' ? interlocutorName : 'Вас'}</span>
+                  <span>Отправить от: {currentSender === 'interlocutor' ? interlocutorName : 'Вас'}</span>
                 </>
               )}
             </button>
@@ -323,7 +399,7 @@ export const BotSimulator: React.FC = () => {
                   <div className="text-xs font-bold text-white flex items-center gap-1.5">
                     <span>{interlocutorName}</span>
                     <span className="text-[9px] bg-blue-500/20 text-blue-300 px-1.5 py-0.2 rounded font-normal">
-                      Чужое ЛС
+                      @{interlocutorHandle}
                     </span>
                   </div>
                   <div className="text-[10px] text-emerald-400">Секретарь подключен • Stateless Mirror</div>
@@ -335,13 +411,47 @@ export const BotSimulator: React.FC = () => {
             </div>
 
             {/* Telegram Chat Feed */}
-            <div className="bg-[#0f172a] rounded-2xl p-4 border border-slate-800 text-white text-xs space-y-3 min-h-[290px] max-h-[360px] overflow-y-auto shadow-inner">
+            <div className="bg-[#0f172a] rounded-2xl p-4 border border-slate-800 text-white text-xs space-y-3 min-h-[300px] max-h-[380px] overflow-y-auto shadow-inner">
               {chatHistory.map((item) => {
                 if (item.type === 'system') {
                   return (
                     <div key={item.id} className="flex justify-center my-2">
                       <div className="bg-blue-950/80 border border-blue-500/30 text-blue-200 text-[11px] rounded-xl px-3 py-2 text-center max-w-[90%] shadow-md">
                         {item.content}
+                      </div>
+                    </div>
+                  );
+                }
+
+                // Render Metadata Protocol Card
+                if (item.type === 'metadata') {
+                  return (
+                    <div key={item.id} className="flex justify-start my-1.5">
+                      <div className="bg-slate-900 border border-emerald-500/30 rounded-xl p-2.5 text-xs shadow-lg max-w-[85%] text-slate-200 font-sans space-y-1">
+                        <div className="flex items-center gap-1.5 text-emerald-400 font-bold text-[11px] pb-1 border-b border-slate-800">
+                          <Tag className="w-3.5 h-3.5" />
+                          <span>📋 [СЕКРЕТАРЬ • ПРОТОКОЛ СООБЩЕНИЯ]</span>
+                        </div>
+                        <div className="grid grid-cols-1 gap-0.5 text-[11px] pt-0.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-slate-400">👤 Отправитель:</span>
+                            <span className="font-semibold text-white">{item.senderName}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-slate-400">🔖 Никнейм:</span>
+                            <span className="text-blue-300">@{item.senderHandle}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-slate-400">🆔 ID:</span>
+                            <code className="bg-slate-950 px-1.5 py-0.2 rounded text-[10px] text-amber-300 font-mono">
+                              {item.senderId}
+                            </code>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-slate-400">📅 Дата и время:</span>
+                            <span className="text-slate-300">23.08.2026 {item.timestamp}:14 (МСК)</span>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   );
