@@ -1,6 +1,6 @@
 {
   "name": "Personal Secretary Telegram Bot (Stateless DM Mirror)",
-  "description": "Персональный секретарь для личных сообщений: моментальное копирование любых сообщений пользователя без сохранения в памяти",
+  "description": "Персональный секретарь для личных сообщений и чужих ЛС (Telegram Business): надежная адресная доставка без слётов после обновлений, динамическое авто-восстановление сессий, фильтрация /mode и шеринг /team.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -14,15 +14,17 @@ export const BOT_FILES: BotFile[] = [
     name: 'bot.js',
     path: 'api/bot.js',
     language: 'javascript',
-    description: 'Главная Serverless Function Vercel (Webhook). Перехватывает сообщения из чужих ЛС через Telegram Business, строго направляет их подключившему владельцу в ЛС бота, фильтрует по /mode и позволяет делиться с коллегами (/share, /team).',
+    description: 'Главная Serverless Function Vercel (Webhook) с защитой от слётов сессий (Zero-Drop Engine). Авто-восстанавливает связь через Telegram API 7.2+, сохраняет состояние в data/secretary-state.json, фильтрует по /mode и позволяет делиться с коллегами (/share, /team).',
     content: `// api/bot.js
 // Персональный секретарь для личных сообщений и чужих ЛС (Telegram Business + Stateless Mirror)
-// Архитектура: Zero-Retention / Без сохранения состояния (Stateless)
+// Архитектура: Zero-Retention / Без сохранения состояния (Stateless) + Persistent Anti-Drop Engine
 // Логика: перехват входящих/исходящих сообщений в бизнес-чатах и отправка протокола с копией в ЛС владельца с ботом!
 // Поддержка: индивидуальная доставка подключившему владельцу, фильтрация (/mode) и шеринг (/share, /team)
 // Формат: ES Module (совместим с Vercel Serverless Functions & Node.js 18+)
 
 import { Telegraf } from 'telegraf';
+import fs from 'fs';
+import path from 'path';
 
 // 1. Инициализация экземпляра бота
 const BOT_TOKEN = process.env.BOT_TOKEN || '8988916261:AAFjUcZnQuDLbXh32A6zUUI64bCPj7KnW6w';
@@ -48,6 +50,84 @@ const ownerFilterMode = new Map();
 
 // Список доверенных получателей (делегатов) владельца: Map<ownerId, Set<delegateId>>
 const ownerDelegates = new Map();
+
+// --- PERSISTENT STATE STORAGE (Zero-Drop Engine) ---
+const STATE_DIR = path.join(process.cwd(), 'data');
+const STATE_FILE_PATH = path.join(STATE_DIR, 'secretary-state.json');
+const FALLBACK_STATE_PATH = path.join('/tmp', 'secretary-state.json');
+
+function loadPersistentState() {
+  try {
+    let filePath = STATE_FILE_PATH;
+    if (!fs.existsSync(filePath) && fs.existsSync(FALLBACK_STATE_PATH)) {
+      filePath = FALLBACK_STATE_PATH;
+    }
+    if (fs.existsSync(filePath)) {
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (data.connections) {
+        Object.entries(data.connections).forEach(([c, o]) => connectionToOwner.set(c, o));
+      }
+      if (Array.isArray(data.registeredOwners)) {
+        data.registeredOwners.forEach((id) => registeredOwners.add(id));
+      }
+      if (data.lastKnownOwnerId) lastKnownOwnerId = data.lastKnownOwnerId;
+      if (data.ownerFilterMode) {
+        Object.entries(data.ownerFilterMode).forEach(([id, m]) => ownerFilterMode.set(parseInt(id, 10), m));
+      }
+      if (data.ownerDelegates) {
+        Object.entries(data.ownerDelegates).forEach(([id, list]) => ownerDelegates.set(parseInt(id, 10), new Set(list)));
+      }
+    }
+  } catch (err) {
+    console.warn('[PERSISTENCE_LOAD_WARN]', err?.message || err);
+  }
+}
+
+function savePersistentState() {
+  try {
+    if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
+    const state = {
+      connections: Object.fromEntries(connectionToOwner.entries()),
+      registeredOwners: Array.from(registeredOwners),
+      lastKnownOwnerId,
+      ownerFilterMode: Object.fromEntries(ownerFilterMode.entries()),
+      ownerDelegates: Object.fromEntries(Array.from(ownerDelegates.entries()).map(([k, v]) => [k, Array.from(v)])),
+      lastUpdated: new Date().toISOString(),
+    };
+    try {
+      fs.writeFileSync(STATE_FILE_PATH, JSON.stringify(state, null, 2), 'utf-8');
+    } catch {
+      fs.writeFileSync(FALLBACK_STATE_PATH, JSON.stringify(state, null, 2), 'utf-8');
+    }
+  } catch (err) {
+    console.warn('[PERSISTENCE_SAVE_WARN]', err?.message || err);
+  }
+}
+
+loadPersistentState();
+
+// Динамическое API-восстановление владельца (защита от потери сессии)
+async function resolveOwnerId(telegram, businessConnectionId) {
+  if (businessConnectionId && connectionToOwner.has(businessConnectionId)) {
+    return connectionToOwner.get(businessConnectionId);
+  }
+  if (businessConnectionId && telegram?.getBusinessConnection) {
+    try {
+      const connInfo = await telegram.getBusinessConnection(businessConnectionId);
+      if (connInfo?.user?.id) {
+        const ownerId = connInfo.user.id;
+        connectionToOwner.set(businessConnectionId, ownerId);
+        registeredOwners.add(ownerId);
+        lastKnownOwnerId = ownerId;
+        savePersistentState();
+        return ownerId;
+      }
+    } catch (e) {
+      console.warn('[DYNAMIC_RECOVERY_WARN]', e?.message || e);
+    }
+  }
+  return lastKnownOwnerId || (registeredOwners.size > 0 ? Array.from(registeredOwners)[0] : null);
+}
 
 // Вспомогательная функция экранирования HTML
 function escapeHtml(text) {

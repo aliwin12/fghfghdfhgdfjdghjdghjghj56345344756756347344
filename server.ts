@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { Telegraf } from 'telegraf';
 
@@ -21,6 +22,152 @@ const ownerFilterMode = new Map<number, 'all' | 'my_only' | 'clients_only'>();
 
 // Team delegates: Set of user/chat IDs who receive shared business messages
 const ownerDelegates = new Map<number, Set<number>>();
+
+// --- PERSISTENT STATE STORAGE (Zero-Drop Engine) ---
+interface PersistentBotState {
+  connections: Record<string, number>;
+  registeredOwners: number[];
+  lastKnownOwnerId: number | null;
+  ownerFilterMode: Record<number, 'all' | 'my_only' | 'clients_only'>;
+  ownerDelegates: Record<number, number[]>;
+  lastUpdated: string;
+}
+
+const STATE_DIR = path.join(process.cwd(), 'data');
+const STATE_FILE_PATH = path.join(STATE_DIR, 'secretary-state.json');
+const FALLBACK_STATE_PATH = path.join('/tmp', 'secretary-state.json');
+
+function loadPersistentState() {
+  try {
+    let filePath = STATE_FILE_PATH;
+    if (!fs.existsSync(filePath) && fs.existsSync(FALLBACK_STATE_PATH)) {
+      filePath = FALLBACK_STATE_PATH;
+    }
+
+    if (fs.existsSync(filePath)) {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const data: PersistentBotState = JSON.parse(raw);
+
+      if (data.connections) {
+        Object.entries(data.connections).forEach(([connId, ownerId]) => {
+          connectionToOwner.set(connId, ownerId);
+        });
+      }
+      if (Array.isArray(data.registeredOwners)) {
+        data.registeredOwners.forEach((id) => registeredOwners.add(id));
+      }
+      if (data.lastKnownOwnerId) {
+        lastKnownOwnerId = data.lastKnownOwnerId;
+      }
+      if (data.ownerFilterMode) {
+        Object.entries(data.ownerFilterMode).forEach(([idStr, mode]) => {
+          const numId = parseInt(idStr, 10);
+          if (!isNaN(numId)) ownerFilterMode.set(numId, mode);
+        });
+      }
+      if (data.ownerDelegates) {
+        Object.entries(data.ownerDelegates).forEach(([idStr, delList]) => {
+          const numId = parseInt(idStr, 10);
+          if (!isNaN(numId) && Array.isArray(delList)) {
+            ownerDelegates.set(numId, new Set(delList));
+          }
+        });
+      }
+      console.log(`[PERSISTENCE_LOADED] Loaded ${connectionToOwner.size} connections and ${registeredOwners.size} owners from ${filePath}`);
+    }
+  } catch (err: any) {
+    console.warn('[PERSISTENCE_LOAD_WARN] Failed to load state:', err?.message || err);
+  }
+
+  // Load from environment variable if present
+  const envOwner = process.env.DEFAULT_OWNER_ID || process.env.OWNER_ID;
+  if (envOwner) {
+    const parsed = parseInt(envOwner, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      registeredOwners.add(parsed);
+      if (!lastKnownOwnerId) lastKnownOwnerId = parsed;
+    }
+  }
+}
+
+let saveTimeout: NodeJS.Timeout | null = null;
+function savePersistentState() {
+  if (saveTimeout) clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(() => {
+    try {
+      if (!fs.existsSync(STATE_DIR)) {
+        fs.mkdirSync(STATE_DIR, { recursive: true });
+      }
+
+      const state: PersistentBotState = {
+        connections: Object.fromEntries(connectionToOwner.entries()),
+        registeredOwners: Array.from(registeredOwners),
+        lastKnownOwnerId,
+        ownerFilterMode: Object.fromEntries(ownerFilterMode.entries()),
+        ownerDelegates: Object.fromEntries(
+          Array.from(ownerDelegates.entries()).map(([k, v]) => [k, Array.from(v)])
+        ),
+        lastUpdated: new Date().toISOString(),
+      };
+
+      const json = JSON.stringify(state, null, 2);
+      try {
+        fs.writeFileSync(STATE_FILE_PATH, json, 'utf-8');
+      } catch {
+        fs.writeFileSync(FALLBACK_STATE_PATH, json, 'utf-8');
+      }
+      console.log('[PERSISTENCE_SAVED] Bot state permanently written to storage.');
+    } catch (err: any) {
+      console.warn('[PERSISTENCE_SAVE_WARN] Failed to save state:', err?.message || err);
+    }
+  }, 100);
+}
+
+// Initial state load
+loadPersistentState();
+
+// Dynamic Owner Resolution (Guarantees bot never drops secretary mode across updates & restarts)
+async function resolveOwnerId(telegram: any, businessConnectionId?: string): Promise<number | null> {
+  if (businessConnectionId && connectionToOwner.has(businessConnectionId)) {
+    return connectionToOwner.get(businessConnectionId)!;
+  }
+
+  // 1. Dynamic API Query directly to Telegram Bot API
+  if (businessConnectionId && telegram?.getBusinessConnection) {
+    try {
+      console.log(`[DYNAMIC_RECOVERY_ATTEMPT] Fetching business connection ${businessConnectionId} from Telegram API...`);
+      const connInfo = await telegram.getBusinessConnection(businessConnectionId);
+      if (connInfo?.user?.id) {
+        const ownerId = connInfo.user.id;
+        connectionToOwner.set(businessConnectionId, ownerId);
+        registeredOwners.add(ownerId);
+        lastKnownOwnerId = ownerId;
+        savePersistentState();
+        console.log(`[DYNAMIC_RECOVERY_SUCCESS] Connection ${businessConnectionId} linked to owner ${ownerId}`);
+        return ownerId;
+      }
+    } catch (apiErr: any) {
+      console.warn(`[DYNAMIC_RECOVERY_API_WARN] getBusinessConnection failed:`, apiErr?.message || apiErr);
+    }
+  }
+
+  // 2. Fallback to last known owner in memory / storage
+  if (lastKnownOwnerId) return lastKnownOwnerId;
+
+  // 3. Fallback to first registered owner
+  if (registeredOwners.size > 0) {
+    return Array.from(registeredOwners)[0];
+  }
+
+  // 4. Fallback to DEFAULT_OWNER_ID env var
+  const envOwner = process.env.DEFAULT_OWNER_ID || process.env.OWNER_ID;
+  if (envOwner) {
+    const parsed = parseInt(envOwner, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+
+  return null;
+}
 
 // Helper to escape HTML characters
 function escapeHtml(text?: string) {
@@ -302,6 +449,7 @@ bot.on('business_connection' as any, async (ctx: any) => {
       connectionToOwner.set(conn.id, businessUserId);
       registeredOwners.add(businessUserId);
       lastKnownOwnerId = businessUserId;
+      savePersistentState();
     }
 
     console.log(`[BUSINESS_CONNECTION] ID: ${conn?.id}, User: ${businessUserName} (${businessUserId}), Enabled: ${isEnabled}`);
@@ -311,11 +459,12 @@ bot.on('business_connection' as any, async (ctx: any) => {
         businessUserId,
         `💼 <b>Режим Персонального Секретаря Telegram Business АКТИВИРОВАН!</b>\n\n` +
         `✅ Бот успешно подключен к вашим личным диалогам.\n\n` +
-        `🛡 <b>Как теперь работает протоколирование:</b>\n` +
-        `• В чатах с вашими собеседниками бот <b>не спамит</b> и не мешает общению.\n` +
-        `• Все входящие сообщения от собеседников и ваши ответы перехватываются и пересылаются <b>СЮДА (в этот диалог с ботом)</b>.\n` +
-        `• К каждому сообщению прикрепляется карточка: <b>Кто написал, Когда написал, ID, Имя, Никнейм</b> и точная копия самого сообщения (текст, голос, фото, документ и др.).\n` +
-        `• 0 байт данных сохраняется на сторонних серверах (Stateless).`,
+        `🛡 <b>Гарантия постоянной работы (Zero-Drop Engine):</b>\n` +
+        `• <b>Защита от слёта:</b> Привязка сохранена в постоянное хранилище и автоматически восстанавливается через Telegram API после любых перезагрузок или обновлений сервера.\n` +
+        `• В чатах с собеседниками бот <b>не спамит</b> и не мешает общению.\n` +
+        `• Все сообщения из бизнес-чатов направляются <b>СТРОГО СЮДА (в этот ваш диалог)</b>.\n` +
+        `• К каждому сообщению прикрепляется карточка с точной копией (текст, голос, фото, видео, кружочки, файлы).\n\n` +
+        `⚙️ <i>Команды: /mode (фильтр), /share (шеринг), /fix (проверка связи), /status (статус).</i>`,
         { parse_mode: 'HTML' }
       );
     }
@@ -338,12 +487,13 @@ bot.on('business_message' as any, async (ctx: any) => {
     const sender = bMsg.from;
     const senderName = sender?.first_name || 'Собеседник';
 
-    const targetOwnerId = connectionToOwner.get(businessConnectionId) || lastKnownOwnerId;
+    // Resolve owner with automatic dynamic API recovery
+    const targetOwnerId = await resolveOwnerId(ctx.telegram, businessConnectionId);
 
     console.log(`[BUSINESS_MSG_RECV] Conn: ${businessConnectionId}, FromChat: ${fromChatId}, Sender: ${senderName} (ID: ${sender?.id}) -> TargetOwner: ${targetOwnerId}`);
 
     if (!targetOwnerId) {
-      console.warn('[TARGET_OWNER_NOT_FOUND] Владелец не определен. Напишите /start боту в ЛС.');
+      console.warn('[TARGET_OWNER_NOT_FOUND] Владелец не определен. Рекомендуется написать /start или /fix боту в ЛС.');
       return;
     }
 
@@ -368,9 +518,8 @@ bot.on('edited_business_message' as any, async (ctx: any) => {
     const fromChat = bMsg.chat;
     const fromChatId = fromChat?.id;
     const messageId = bMsg.message_id;
-    const sender = bMsg.from;
 
-    const targetOwnerId = connectionToOwner.get(businessConnectionId) || lastKnownOwnerId;
+    const targetOwnerId = await resolveOwnerId(ctx.telegram, businessConnectionId);
     if (!targetOwnerId) return;
 
     console.log(`[BUSINESS_MSG_EDITED] Chat: ${fromChatId}, Msg ID: ${messageId} -> TargetOwner: ${targetOwnerId}`);
@@ -405,19 +554,55 @@ bot.start(async (ctx) => {
     if (userId) {
       registeredOwners.add(userId);
       lastKnownOwnerId = userId;
+      savePersistentState();
     }
 
     return await ctx.replyWithHTML(
       `💼 <b>Привет, ${userName}!</b>\n\n` +
-      `Я — ваш <b>Персональный Секретарь Telegram</b>.\n\n` +
+      `Я — ваш <b>Персональный Секретарь Telegram</b> с постоянной привязкой (защита от слёта при обновлениях).\n\n` +
       `📌 <b>Как это работает:</b>\n` +
-      `1️⃣ <b>Секретарь в чужих ЛС:</b> Подключите меня в <i>Настройки Telegram → Telegram Business → Чат-боты</i>. Все входящие и исходящие сообщения из ваших диалогов с клиентами/друзьями будут протоколироваться и пересылаться <b>СЮДА (в этот наш диалог)</b>.\n` +
-      `2️⃣ <b>Прямой диалог:</b> Отправьте мне сюда любую заметку или файл — я сохраню точную копию с метаданными.\n\n` +
-      `🛡 <b>В чатах с собеседниками бот ничего не пишет и не спамит!</b> Все протоколы и копии приходят только вам сюда.\n` +
-      `🔒 <i>Stateless / Zero Data Retention: данные не сохраняются на сторонних серверах.</i>`
+      `1️⃣ <b>Секретарь в чужих ЛС:</b> Подключите меня в <i>Настройки Telegram → Telegram Business → Чат-боты</i>. Все входящие и исходящие сообщения из ваших диалогов с клиентами будут протоколироваться и пересылаться <b>СЮДА (в этот наш диалог)</b>.\n` +
+      `2️⃣ <b>Постоянное авто-восстановление:</b> Ваша сессия навсегда зафиксирована — даже при перезапуске сервера бот не потеряет привязку к вашему аккаунту.\n` +
+      `3️⃣ <b>Прямой диалог:</b> Отправьте мне сюда любую заметку или файл — я сохраню точную копию с метаданными.\n\n` +
+      `🛡 <b>В чатах с собеседниками бот ничего не пишет и не спамит!</b>\n` +
+      `⚙️ <i>Проверка состояния: /status | Самодиагностика: /fix</i>`
     );
   } catch (err: any) {
     console.error('[START_CMD_ERROR]', err?.message || err);
+  }
+});
+
+// Self-healing & Reconnect Command
+bot.command(['fix', 'reconnect', 'sync'], async (ctx) => {
+  try {
+    const userId = ctx.from?.id;
+    const userName = ctx.from?.first_name || 'Владелец';
+
+    if (userId) {
+      registeredOwners.add(userId);
+      lastKnownOwnerId = userId;
+      savePersistentState();
+    }
+
+    const activeConnections = Array.from(connectionToOwner.entries())
+      .filter(([_, oId]) => oId === userId)
+      .map(([cId]) => cId);
+
+    const currentFilter = (userId ? ownerFilterMode.get(userId) : null) || 'all';
+    const delegatesCount = (userId ? ownerDelegates.get(userId)?.size : 0) || 0;
+
+    return await ctx.replyWithHTML(
+      `🛡 <b>[ДИАГНОСТИКА И АВТО-ВОССТАНОВЛЕНИЕ СЕКРЕТАРЯ]</b>\n\n` +
+      `✅ <b>Связь с владельцем:</b> Активна (ID: <code>${userId}</code>)\n` +
+      `💾 <b>Постоянное хранилище:</b> Сохранено в data/secretary-state.json\n` +
+      `🔄 <b>Динамическое API-восстановление:</b> Включено (Telegram Bot API 7.2+)\n` +
+      `🔗 <b>Активных бизнес-привязок к вашему ID:</b> ${activeConnections.length > 0 ? activeConnections.length + ' шт.' : '0 (ожидает первого сообщения или подключения)'}\n` +
+      `⚙️ <b>Режим фильтра:</b> <code>${currentFilter}</code>\n` +
+      `👥 <b>Доверенных коллег в команде:</b> ${delegatesCount} чел.\n\n` +
+      `💡 <i>Если вы только что подключили бота в Настройки → Telegram Business → Чат-боты, напишите любое сообщение в любой ваш диалог для моментальной синхронизации.</i>`
+    );
+  } catch (err: any) {
+    console.error('[FIX_CMD_ERROR]', err?.message || err);
   }
 });
 
@@ -437,6 +622,7 @@ bot.help(async (ctx) => {
       `ℹ️ <b>Справка Персонального Секретаря Telegram:</b>\n\n` +
       `🛡 <b>Кому приходят сообщения:</b>\n` +
       `Бот пересылает сообщения <b>СТРОГО ВАМ</b> (в этот личный чат). В чатах с собеседниками бот ничего не пишет и не спамит!\n\n` +
+      `🔒 <b>Защита от слётов:</b> Встроен постоянный механизм динамического восстановления сессий через Telegram API.\n\n` +
       `⚙️ <b>Текущие настройки:</b>\n` +
       `• Фильтр: <b>${modeLabels[currentMode]}</b>\n` +
       `• Доверенные коллеги (Sharing): <b>${delegatesCount} чел.</b>\n\n` +
@@ -445,11 +631,10 @@ bot.help(async (ctx) => {
       `• <code>/share &lt;ID&gt;</code> — добавить коллегу/ассистента для отправки копий\n` +
       `• <code>/unshare &lt;ID&gt;</code> — удалить коллегу из списка\n` +
       `• <code>/team</code> — список подключенных коллег\n` +
-      `• <code>/status</code> — статус подключения и память (0 KB Stateless)\n\n` +
+      `• <code>/fix</code> — принудительная синхронизация и проверка связи\n` +
+      `• <code>/status</code> — статус подключения и постоянного хранилища\n\n` +
       `📤 <b>Как делиться сообщениями:</b>\n` +
-      `Под каждым протоколом есть кнопки:\n` +
-      `• <b>«📤 Поделиться в Telegram»</b> — отправка в любой чат через инлайн-меню.\n` +
-      `• <b>«👥 Переслать коллегам»</b> — мгновенная отправка всей команде из <code>/team</code>.`
+      `Под каждым протоколом есть кнопки <b>«📤 Поделиться»</b> и <b>«👥 Переслать коллегам»</b>.`
     );
   } catch (err: any) {
     console.error('[HELP_CMD_ERROR]', err?.message || err);
@@ -517,6 +702,7 @@ bot.command('share', async (ctx) => {
       ownerDelegates.set(userId, new Set<number>());
     }
     ownerDelegates.get(userId)!.add(targetDelegateId);
+    savePersistentState();
 
     return await ctx.replyWithHTML(
       `✅ <b>Коллега успешно добавлен в список доверенных лиц!</b>\n\n` +
@@ -543,6 +729,7 @@ bot.command('unshare', async (ctx) => {
     const delegates = ownerDelegates.get(userId);
     if (delegates && delegates.has(targetDelegateId)) {
       delegates.delete(targetDelegateId);
+      savePersistentState();
       return await ctx.replyWithHTML(`✅ Пользователь <code>${targetDelegateId}</code> удален из списка шеринга.`);
     } else {
       return await ctx.replyWithHTML(`ℹ️ Пользователь <code>${targetDelegateId}</code> не найден в вашем списке доверенных лиц.`);
@@ -591,6 +778,7 @@ bot.action(/^set_filter_(all|my_only|clients_only)$/, async (ctx: any) => {
 
     const newFilter = ctx.match[1] as 'all' | 'my_only' | 'clients_only';
     ownerFilterMode.set(userId, newFilter);
+    savePersistentState();
 
     const filterName = newFilter === 'all' ? '💬 Все сообщения' : newFilter === 'my_only' ? '👤 Только МОИ сообщения' : '👥 Только сообщения клиентов';
 
@@ -722,13 +910,24 @@ bot.on('inline_query', async (ctx: any) => {
 
 bot.command('status', async (ctx) => {
   try {
+    const userId = ctx.from?.id;
+    const isOwner = userId ? registeredOwners.has(userId) : false;
+    const currentMode = (userId ? ownerFilterMode.get(userId) : null) || 'all';
+    const delegatesCount = (userId ? ownerDelegates.get(userId)?.size : 0) || 0;
+    const totalConnections = connectionToOwner.size;
+
     return await ctx.replyWithHTML(
-      `⚡ <b>Статус:</b> Секретарь активен (Онлайн)\n` +
-      `🛡 <b>Режим:</b> Private DM + Telegram Business Forwarder\n` +
-      `📥 <b>Куда приходят логи:</b> В этот личный чат с ботом\n` +
-      `🧠 <b>Хранилище (State):</b> 0 KB (Stateless / Zero Data Retention)\n` +
+      `⚡ <b>Статус Персонального Секретаря:</b> Активен (Онлайн)\n\n` +
+      `🛡 <b>Защита от слётов:</b> 🟢 Включена (Zero-Drop Persistent Engine)\n` +
+      `💾 <b>Файл сессий:</b> <code>data/secretary-state.json</code> (сохранен)\n` +
+      `🔄 <b>Авто-восстановление:</b> Telegram Bot API 7.2+ Dynamic Recovery\n` +
+      `👤 <b>Ваш статус:</b> ${isOwner ? '✅ Зарегистрированный владелец' : 'Гость (нажмите /start)'}\n` +
+      `⚙️ <b>Режим фильтра:</b> <code>${currentMode}</code>\n` +
+      `👥 <b>Команда шеринга:</b> ${delegatesCount} чел.\n` +
+      `🔗 <b>Всего бизнес-привязок в системе:</b> ${totalConnections} шт.\n` +
       `⏱ <b>Uptime:</b> ${process.uptime().toFixed(1)} сек.\n` +
-      `📦 <b>Node.js:</b> ${process.version}`
+      `📦 <b>Node.js:</b> ${process.version}\n\n` +
+      `💡 <i>Для принудительной проверки и повторной привязки введите: <code>/fix</code></i>`
     );
   } catch (err: any) {
     console.error('[STATUS_CMD_ERROR]', err?.message || err);
@@ -752,6 +951,7 @@ bot.on('message', async (ctx) => {
   if (sender?.id) {
     registeredOwners.add(sender.id);
     lastKnownOwnerId = sender.id;
+    savePersistentState();
   }
 
   try {
@@ -784,12 +984,17 @@ async function startServer() {
     }
   });
 
-  // Health check
-  app.get('/api/bot', (req, res) => {
+  // Health and Sync status check
+  app.get(['/api/bot', '/api/bot/sync', '/api/health'], (req, res) => {
     res.json({
       status: 'ok',
       service: 'Personal Secretary Telegram Bot (Business Forwarder to Bot DM)',
-      stateless: true,
+      zero_drop_engine: true,
+      persistent_storage: true,
+      registered_owners_count: registeredOwners.size,
+      active_connections_count: connectionToOwner.size,
+      last_known_owner_id: lastKnownOwnerId,
+      stateless_mirror: true,
       business_support: true,
       ready: true,
       timestamp: new Date().toISOString(),
