@@ -1,23 +1,30 @@
-import { CodeFile } from '../types';
-
 export const BOT_TOKEN = '8988916261:AAFjUcZnQuDLbXh32A6zUUI64bCPj7KnW6w';
-export const DEFAULT_APP_DOMAIN = 'secretary-bot.app';
+export const DEFAULT_APP_DOMAIN = 'ais-dev-nc4s6mfeud2wejmjful7dj-155005426446.europe-west2.run.app';
 
-export const BOT_FILES: CodeFile[] = [
+export interface BotFile {
+  name: string;
+  path: string;
+  language: string;
+  content: string;
+  description: string;
+}
+
+export const BOT_FILES: BotFile[] = [
   {
-    name: 'api/bot.js',
+    name: 'bot.js',
     path: 'api/bot.js',
     language: 'javascript',
-    description: 'Главная Serverless-функция персонального секретаря. Поддерживает работу в чужих ЛС через Telegram Business (дублирует реплики собеседника и владельца), выводит системную плашку об управлении чатом и мгновенно освобождает память (Stateless).',
+    description: 'Главная Serverless Function Vercel (Webhook). Перехватывает входящие и исходящие сообщения из чужих ЛС через Telegram Business и пересылает протокол с точной копией в ваш личный диалог с ботом.',
     content: `// api/bot.js
 // Персональный секретарь для личных сообщений и чужих ЛС (Telegram Business + Stateless Mirror)
 // Архитектура: Zero-Retention / Без сохранения состояния (Stateless)
+// Логика: перехват всех входящих и исходящих сообщений в бизнес-чатах и отправка протокола с копией в ЛС владельца с ботом!
 // Формат: ES Module (совместим с Vercel Serverless Functions & Node.js 18+)
 
 import { Telegraf } from 'telegraf';
 
 // 1. Инициализация экземпляра бота
-const BOT_TOKEN = process.env.BOT_TOKEN || '${BOT_TOKEN}';
+const BOT_TOKEN = process.env.BOT_TOKEN || '8988916261:AAFjUcZnQuDLbXh32A6zUUI64bCPj7KnW6w';
 
 if (!BOT_TOKEN) {
   console.error('[CONFIG_ERROR] BOT_TOKEN is not defined in environment variables');
@@ -30,12 +37,13 @@ bot.catch((err) => {
   console.error('[TELEGRAF_BOT_ERROR]', err?.message || err);
 });
 
-// Кэш отправленных предупреждений об управлении чатом
-const announcedBusinessChats = new Set();
-const greetedPrivateChats = new Set();
+// Кэш сопоставления подключений к ID владельца и список зарегистрированных пользователей
+const connectionToOwner = new Map();
+const registeredOwners = new Set();
+let lastKnownOwnerId = null;
 
 // Вспомогательная функция формирования заголовка протокола сообщения
-function formatMetadataHeader(from, dateUnix) {
+function formatMetadataHeader(from, dateUnix, chatInfo = null, isEdited = false) {
   const date = dateUnix ? new Date(dateUnix * 1000) : new Date();
   const timeStr = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Europe/Moscow' });
   const dateStr = date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Moscow' });
@@ -44,12 +52,15 @@ function formatMetadataHeader(from, dateUnix) {
   const username = from?.username ? \`@\${from.username}\` : 'нет никнейма';
   const userId = from?.id || '—';
 
+  const chatTitle = chatInfo ? (chatInfo.title || [chatInfo.first_name, chatInfo.last_name].filter(Boolean).join(' ') || chatInfo.username || \`Чат \${chatInfo.id}\`) : null;
+
   return (
-    \`📋 <b>[СЕКРЕТАРЬ • ПРОТОКОЛ СООБЩЕНИЯ]</b>\\n\` +
-    \`👤 <b>Отправитель:</b> \${fullName}\\n\` +
+    \`\${isEdited ? '✏️' : '📋'} <b>[СЕКРЕТАРЬ • \${isEdited ? 'ИЗМЕНЕНО СООБЩЕНИЕ' : 'ПРОТОКОЛ ПЕРЕХВАТА'}]</b>\\n\` +
+    (chatTitle ? \`💬 <b>Диалог:</b> \${chatTitle} (ID: <code>\${chatInfo?.id}</code>)\\n\` : '') +
+    \`👤 <b>Кто написал:</b> \${fullName}\\n\` +
     \`🔖 <b>Никнейм:</b> \${username}\\n\` +
-    \`🆔 <b>ID:</b> <code>\${userId}</code>\\n\` +
-    \`📅 <b>Дата и время:</b> \${dateStr} \${timeStr} (МСК)\`
+    \`🆔 <b>ID автора:</b> <code>\${userId}</code>\\n\` +
+    \`📅 <b>Когда:</b> \${dateStr} в \${timeStr} (МСК)\`
   );
 }
 
@@ -61,18 +72,24 @@ bot.on('business_connection', async (ctx) => {
     const businessUserId = conn?.user?.id;
     const businessUserName = conn?.user?.first_name || 'Владелец аккаунта';
 
+    if (conn?.id && businessUserId) {
+      connectionToOwner.set(conn.id, businessUserId);
+      registeredOwners.add(businessUserId);
+      lastKnownOwnerId = businessUserId;
+    }
+
     console.log(\`[BUSINESS_CONNECTION] ID: \${conn?.id}, User: \${businessUserName} (\${businessUserId}), Enabled: \${isEnabled}\`);
 
     if (isEnabled && businessUserId) {
       await ctx.telegram.sendMessage(
         businessUserId,
         \`💼 <b>Режим Персонального Секретаря Telegram Business АКТИВИРОВАН!</b>\\n\\n\` +
-        \`✅ Бот подключен к вашему личному аккаунту Telegram.\\n\\n\` +
-        \`🛡 <b>Как это работает в чужих ЛС:</b>\\n\` +
-        \`• Когда вам пишет собеседник или когда вы отвечаете ему — бот дублирует (копирует) сообщение.\\n\` +
-        \`• Каждая копия подписывается метаданными: <b>Кто написал, Когда написал, ID, Имя и Никнейм</b>.\\n\` +
-        \`• В начале диалога появится системная плашка, что этим чатом управляет бот-секретарь.\\n\` +
-        \`• 0 байт данных сохраняется на сервере (Stateless).\`,
+        \`✅ Бот успешно подключен к вашим личным диалогам.\\n\\n\` +
+        \`🛡 <b>Как теперь работает протоколирование:</b>\\n\` +
+        \`• В чатах с вашими собеседниками бот <b>не спамит</b> и не мешает общению.\\n\` +
+        \`• Все входящие сообщения от собеседников и ваши ответы перехватываются и пересылаются <b>СЮДА (в этот диалог с ботом)</b>.\\n\` +
+        \`• К каждому сообщению прикрепляется карточка: <b>Кто написал, Когда написал, ID, Имя, Никнейм</b> и точная копия самого сообщения (текст, голос, фото, документ и др.).\\n\` +
+        \`• 0 байт данных сохраняется на сторонних серверах (Stateless).\`,
         { parse_mode: 'HTML' }
       );
     }
@@ -82,57 +99,48 @@ bot.on('business_connection', async (ctx) => {
 });
 
 // 3. Обработка сообщений в чужих ЛС через Telegram Business (собеседник + сам пользователь)
+// Бот отправляет протокол и копию в ЛС ВЛАДЕЛЬЦА С БОТОМ (не засоряя чат собеседника!)
 bot.on('business_message', async (ctx) => {
   try {
     const bMsg = ctx.update.business_message;
     if (!bMsg) return;
 
     const businessConnectionId = bMsg.business_connection_id;
-    const chatId = bMsg.chat?.id;
+    const fromChat = bMsg.chat;
+    const fromChatId = fromChat?.id;
     const messageId = bMsg.message_id;
     const sender = bMsg.from;
     const senderName = sender?.first_name || 'Собеседник';
 
-    console.log(\`[BUSINESS_MSG_RECV] Conn: \${businessConnectionId}, Chat: \${chatId}, From: \${senderName} (ID: \${sender?.id})\`);
+    // Определяем получателя (ЛС владельца с ботом)
+    const targetOwnerId = connectionToOwner.get(businessConnectionId) || lastKnownOwnerId;
 
-    // Отправляем уведомление, что чатом управляет бот (один раз на чат)
-    const noticeKey = \`\${businessConnectionId}_\${chatId}\`;
-    if (!announcedBusinessChats.has(noticeKey)) {
-      announcedBusinessChats.add(noticeKey);
-      try {
-        await ctx.telegram.sendMessage(
-          chatId,
-          \`🤖 <i>Этим чатом управляет Персональный Секретарь Telegram. Все входящие и исходящие сообщения протоколируются и копируются.</i>\`,
-          {
-            business_connection_id: businessConnectionId,
-            parse_mode: 'HTML',
-          }
-        );
-      } catch (noticeErr) {
-        console.warn('[BUSINESS_NOTICE_FAILED]', noticeErr?.message || noticeErr);
-      }
+    console.log(\`[BUSINESS_MSG_RECV] Conn: \${businessConnectionId}, FromChat: \${fromChatId}, Sender: \${senderName} (ID: \${sender?.id}) -> TargetOwner: \${targetOwnerId}\`);
+
+    if (!targetOwnerId) {
+      console.warn('[TARGET_OWNER_NOT_FOUND] Владелец не определен. Напишите /start боту в ЛС.');
+      return;
     }
 
-    const header = formatMetadataHeader(sender, bMsg.date);
+    const header = formatMetadataHeader(sender, bMsg.date, fromChat, false);
     const startTime = Date.now();
 
-    // 1. Отправляем детальную карточку-подпись с данными отправителя
+    // 1. Отправляем карточку с метаданными в ЛС владельца с ботом
     await ctx.telegram.sendMessage(
-      chatId,
+      targetOwnerId,
       header,
-      {
-        business_connection_id: businessConnectionId,
-        parse_mode: 'HTML',
-      }
+      { parse_mode: 'HTML' }
     );
 
-    // 2. Моментальное нативное копирование сообщения в этот же бизнес-чат
-    await ctx.telegram.copyMessage(chatId, chatId, messageId, {
-      business_connection_id: businessConnectionId,
-    });
+    // 2. Копируем исходное сообщение (любой тип контента) прямо в ЛС владельца
+    await ctx.telegram.copyMessage(
+      targetOwnerId,
+      fromChatId,
+      messageId
+    );
 
     const elapsed = Date.now() - startTime;
-    console.log(\`[BUSINESS_MSG_COPIED] Msg ID \${messageId} copied with metadata in business chat \${chatId} (\${elapsed}ms). Memory purged.\`);
+    console.log(\`[BUSINESS_MSG_FORWARDED_TO_OWNER] Msg ID \${messageId} forwarded to owner \${targetOwnerId} (\${elapsed}ms). Chat with client kept clean!\`);
   } catch (err) {
     console.error('[BUSINESS_MSG_ERROR]', err?.message || err);
   }
@@ -144,26 +152,29 @@ bot.on('edited_business_message', async (ctx) => {
     const bMsg = ctx.update.edited_business_message;
     if (!bMsg) return;
     const businessConnectionId = bMsg.business_connection_id;
-    const chatId = bMsg.chat?.id;
+    const fromChat = bMsg.chat;
+    const fromChatId = fromChat?.id;
     const messageId = bMsg.message_id;
     const sender = bMsg.from;
 
-    console.log(\`[BUSINESS_MSG_EDITED] Chat: \${chatId}, Msg ID: \${messageId}\`);
+    const targetOwnerId = connectionToOwner.get(businessConnectionId) || lastKnownOwnerId;
+    if (!targetOwnerId) return;
 
-    const header = \`✏️ <b>[ИЗМЕНЕНО СООБЩЕНИЕ]</b>\\n\` + formatMetadataHeader(sender, bMsg.edit_date || bMsg.date);
+    console.log(\`[BUSINESS_MSG_EDITED] Chat: \${fromChatId}, Msg ID: \${messageId} -> TargetOwner: \${targetOwnerId}\`);
+
+    const header = formatMetadataHeader(sender, bMsg.edit_date || bMsg.date, fromChat, true);
     
     await ctx.telegram.sendMessage(
-      chatId,
+      targetOwnerId,
       header,
-      {
-        business_connection_id: businessConnectionId,
-        parse_mode: 'HTML',
-      }
+      { parse_mode: 'HTML' }
     );
 
-    await ctx.telegram.copyMessage(chatId, chatId, messageId, {
-      business_connection_id: businessConnectionId,
-    });
+    await ctx.telegram.copyMessage(
+      targetOwnerId,
+      fromChatId,
+      messageId
+    );
   } catch (err) {
     console.error('[EDITED_BUSINESS_MSG_ERROR]', err?.message || err);
   }
@@ -189,16 +200,25 @@ bot.use(async (ctx, next) => {
   }
 });
 
-// 6. Команды управления в личных сообщениях
+// 6. Команды управления в личных сообщениях с ботом
 bot.start(async (ctx) => {
   try {
+    const userId = ctx.from?.id;
+    const userName = ctx.from?.first_name || 'пользователь';
+
+    if (userId) {
+      registeredOwners.add(userId);
+      lastKnownOwnerId = userId;
+    }
+
     return await ctx.replyWithHTML(
-      \`💼 <b>Привет, \${ctx.from?.first_name || 'пользователь'}!</b>\\n\\n\` +
-      \`Я — ваш <b>Персональный Секретарь</b> для личных сообщений и <b>чужих ЛС (Telegram Business)</b>.\\n\\n\` +
-      \`📌 <b>2 режима работы:</b>\\n\` +
-      \`1️⃣ <b>Прямой диалог:</b> Отправьте мне любой текст, фото, документ, голосовое сообщение — я создам точную копию в этом чате.\\n\` +
-      \`2️⃣ <b>Секретарь в чужих ЛС:</b> Подключите меня в <i>Настройки Telegram → Telegram Business → Чат-боты</i>. Я буду автоматически копировать сообщения вашего собеседника и ваши ответы, а в чате будет написано, что им управляет бот.\\n\\n\` +
-      \`🔒 <i>Stateless / Zero Data Retention: данные не сохраняются на сервере.</i>\`
+      \`💼 <b>Привет, \${userName}!</b>\\n\\n\` +
+      \`Я — ваш <b>Персональный Секретарь Telegram</b>.\\n\\n\` +
+      \`📌 <b>Как это работает:</b>\\n\` +
+      \`1️⃣ <b>Секретарь в чужих ЛС:</b> Подключите меня в <i>Настройки Telegram → Telegram Business → Чат-боты</i>. Все входящие и исходящие сообщения из ваших диалогов с клиентами/друзьями будут протоколироваться и пересылаться <b>СЮДА (в этот наш диалог)</b>.\\n\` +
+      \`2️⃣ <b>Прямой диалог:</b> Отправьте мне сюда любую заметку или файл — я сохраню точную копию с метаданными.\\n\\n\` +
+      \`🛡 <b>В чатах с собеседниками бот ничего не пишет и не спамит!</b> Все протоколы и копии приходят только вам сюда.\\n\` +
+      \`🔒 <i>Stateless / Zero Data Retention: данные не сохраняются на сторонних серверах.</i>\`
     );
   } catch (err) {
     console.error('[START_CMD_ERROR]', err?.message || err);
@@ -213,7 +233,7 @@ bot.help(async (ctx) => {
       \`1. Откройте <b>Настройки Telegram</b> (требуется Telegram Premium / Business).\\n\` +
       \`2. Перейдите в <b>Telegram для бизнеса → Чат-боты</b>.\\n\` +
       \`3. Введите юзернейм этого бота и включите доступ к личным чатам.\\n\` +
-      \`4. Бот будет автоматически протоколировать и копировать реплики обоих участников, выводя уведомление об управлении чатом.\\n\\n\` +
+      \`4. Все сообщения из ваших личных диалогов будут мгновенно протоколироваться и дублироваться <b>в этот чат с ботом</b>.\\n\\n\` +
       \`⚙️ Команды: /start, /help, /status\`
     );
   } catch (err) {
@@ -225,8 +245,8 @@ bot.command('status', async (ctx) => {
   try {
     return await ctx.replyWithHTML(
       \`⚡ <b>Статус:</b> Секретарь активен (Онлайн)\\n\` +
-      \`🛡 <b>Режим:</b> Private DM + Telegram Business (Чужие ЛС)\\n\` +
-      \`📢 <b>Плашка в чате:</b> «Этим чатом управляет бот» (Включено)\\n\` +
+      \`🛡 <b>Режим:</b> Private DM + Telegram Business Forwarder\\n\` +
+      \`📥 <b>Куда приходят логи:</b> В этот личный чат с ботом\\n\` +
       \`🧠 <b>Хранилище (State):</b> 0 KB (Stateless / Zero Data Retention)\\n\` +
       \`⏱ <b>Uptime:</b> \${process.uptime().toFixed(1)} сек.\\n\` +
       \`📦 <b>Node.js:</b> \${process.version}\`
@@ -236,7 +256,7 @@ bot.command('status', async (ctx) => {
   }
 });
 
-// 7. Основной обработчик: Моментальное копирование любого прямого личного сообщения
+// 7. Основной обработчик: Моментальное копирование любого прямого сообщения в ЛС с ботом
 bot.on('message', async (ctx) => {
   try {
     const message = ctx.message;
@@ -252,14 +272,14 @@ bot.on('message', async (ctx) => {
     const sender = message.from;
     const startTime = Date.now();
 
-    if (!greetedPrivateChats.has(chatId)) {
-      greetedPrivateChats.add(chatId);
-      await ctx.replyWithHTML(\`🤖 <i>Этим чатом управляет Персональный Секретарь. Протоколирую сообщение...</i>\`);
+    if (sender?.id) {
+      registeredOwners.add(sender.id);
+      lastKnownOwnerId = sender.id;
     }
 
-    const header = formatMetadataHeader(sender, message.date);
+    const header = formatMetadataHeader(sender, message.date, null, false);
 
-    // 1. Отправляем детальную карточку-подпись
+    // 1. Отправляем детальную карточку-подпись в чат с ботом
     await ctx.replyWithHTML(header);
 
     // 2. Нативное копирование сообщения в тот же чат (сохраняет форматирование, медиа, подписи, стикеры)
@@ -278,13 +298,13 @@ export default async function handler(req, res) {
   if (req.method === 'GET') {
     return res.status(200).json({
       status: 'ok',
-      service: 'Personal Secretary Telegram Bot (DM & Business Mirror)',
+      service: 'Personal Secretary Telegram Bot (Business Forwarder to Bot DM)',
       stateless: true,
       business_support: true,
       ready: true,
       timestamp: new Date().toISOString(),
       uptime_seconds: process.uptime(),
-      message: 'Telegram Webhook endpoint is active and listening for POST updates (DM & Business).'
+      message: 'Telegram Webhook endpoint is active. Messages are forwarded into user DM with bot.'
     });
   }
 
@@ -321,125 +341,42 @@ export default async function handler(req, res) {
   if (!res.headersSent) {
     res.status(200).end();
   }
-}
-`,
-  },
-  {
-    name: 'vercel.json',
-    path: 'vercel.json',
-    language: 'json',
-    description: 'Конфигурация Vercel Serverless: автоматический маппинг /api/bot без конфликта маршрутов.',
-    content: `{
-  "version": 2,
-  "rewrites": [
-    {
-      "source": "/webhook",
-      "destination": "/api/bot"
-    }
-  ],
-  "headers": [
-    {
-      "source": "/api/(.*)",
-      "headers": [
-        {
-          "key": "X-Content-Type-Options",
-          "value": "nosniff"
-        }
-      ]
-    }
-  ]
-}
-`,
+}`
   },
   {
     name: 'package.json',
     path: 'package.json',
     language: 'json',
-    description: 'Зависимости проекта: библиотека Telegraf для бессерверной обработки входящих запросов.',
+    description: 'Манифест зависимостей Node.js (Telegraf v4.x)',
     content: `{
-  "name": "telegram-personal-secretary-bot",
-  "version": "1.0.0",
+  "name": "personal-secretary-telegram-bot",
+  "version": "2.0.0",
+  "private": true,
   "type": "module",
-  "description": "Stateless Personal Secretary Telegram Bot (DM Mirror & Zero Memory)",
-  "main": "api/bot.js",
   "scripts": {
-    "start": "node api/bot.js"
+    "dev": "tsx server.ts",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "start": "node dist/server.cjs"
   },
-  "keywords": [
-    "telegram",
-    "bot",
-    "secretary",
-    "telegraf",
-    "serverless",
-    "stateless",
-    "copy-message"
-  ],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
-    "telegraf": "^4.16.3"
-  },
-  "engines": {
-    "node": ">=18.x"
+    "telegraf": "^4.16.3",
+    "express": "^4.19.2"
   }
-}
-`,
+}`
   },
   {
-    name: '.env.example',
-    path: '.env.example',
-    language: 'bash',
-    description: 'Шаблон переменных окружения для локальной разработки и облачного деплоя.',
-    content: `# Токен вашего Telegram бота (получен у @BotFather)
-BOT_TOKEN=8988916261:AAFjUcZnQuDLbXh32A6zUUI64bCPj7KnW6w
-
-# (Опционально) Секретный токен вебхука для валидации входящих запросов
-# WEBHOOK_SECRET=my_ultra_secure_secret_hash_123
-`,
-  },
-  {
-    name: '.gitignore',
-    path: '.gitignore',
-    language: 'bash',
-    description: 'Исключает системные папки, зависимости и локальные секреты из репозитория GitHub.',
-    content: `# Зависимости
-node_modules/
-
-# Локальные переменные окружения
-.env
-.env.local
-.env.*.local
-
-# Системные папки
-.vercel
-
-# Логи и временные файлы
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.DS_Store
-`,
-  },
-  {
-    name: 'README.md',
-    path: 'README.md',
-    language: 'markdown',
-    description: 'Документация и пошаговая инструкция подключения к чужим ЛС через Telegram Business.',
-    content: `# 💼 Telegram Personal Secretary Bot (Telegram Business + Stateless DM Mirror)
-
-Персональный Telegram-бот секретарь для работы в личных сообщениях и **чужих ЛС**:
-- 🌐 **Telegram Business (Работа в чужих ЛС)** — подключается к личному аккаунту и автоматически копирует сообщения собеседника и ваши ответы в диалогах с другими людьми.
-- 📢 **Оповещение в чате** — в диалоге отображается плашка: *«Этим чатом управляет Персональный Секретарь Telegram»*.
-- 📋 **Мгновенное копирование** — дублирует любые типы сообщений (текст, фото, видео, кружочки, аудио, документы, стикеры) через нативный API \`copyMessage\`.
-- 🧠 **Stateless (Zero Retention)** — моментально забывает данные сразу после отправки, не сохраняя переписку на сервере или в базе данных.
-- 💾 **Сохранение в чате** — все копии навсегда остаются в ленте диалога Telegram.
-
-## 🚀 Как подключить к чужим ЛС (Telegram Business):
-1. Откройте **Telegram** (требуется подписка Telegram Premium / Business).
-2. Перейдите в **Настройки → Telegram для бизнеса → Чат-боты (Chatbots)**.
-3. Введите username вашего бота: \`@ваш_бот\` и включите тумблер **Управлять личными чатами**.
-4. Настройте список чатов (все новые ЛС или выбранные контакты).
-5. Теперь бот будет протоколировать и копировать реплики обоих собеседников в реальном времени!
-`,
-  },
+    name: 'vercel.json',
+    path: 'vercel.json',
+    language: 'json',
+    description: 'Конфигурация маршрутизации Vercel Serverless Functions',
+    content: `{
+  "version": 2,
+  "rewrites": [
+    {
+      "source": "/api/bot",
+      "destination": "/api/bot.js"
+    }
+  ]
+}`
+  }
 ];

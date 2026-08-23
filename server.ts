@@ -2,27 +2,22 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { Telegraf } from 'telegraf';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '8988916261:AAFjUcZnQuDLbXh32A6zUUI64bCPj7KnW6w';
+const bot = new Telegraf(BOT_TOKEN || '');
 
-// Initialize Telegraf Bot instance
-const bot = new Telegraf(BOT_TOKEN);
-
-// Global Telegraf error catcher to prevent unhandled rejections
+// Global error handler
 bot.catch((err: any) => {
   console.error('[TELEGRAF_BOT_ERROR]', err?.message || err);
 });
 
-// Cache to remember if we already informed the user in their private DM
-const greetedPrivateChats = new Set<number>();
-// Cache of announced business chats to display the notice about bot managing the chat
-const announcedBusinessChats = new Set<string>();
+// Cache for business connection to owner and registered owners
+const connectionToOwner = new Map<string, number>();
+const registeredOwners = new Set<number>();
+let lastKnownOwnerId: number | null = null;
 
 // Helper to format metadata header
-function formatMetadataHeader(from: any, dateUnix?: number) {
+function formatMetadataHeader(from: any, dateUnix?: number, chatInfo?: any, isEdited = false) {
   const date = dateUnix ? new Date(dateUnix * 1000) : new Date();
   const timeStr = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Europe/Moscow' });
   const dateStr = date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Moscow' });
@@ -31,12 +26,15 @@ function formatMetadataHeader(from: any, dateUnix?: number) {
   const username = from?.username ? `@${from.username}` : 'нет никнейма';
   const userId = from?.id || '—';
 
+  const chatTitle = chatInfo ? (chatInfo.title || [chatInfo.first_name, chatInfo.last_name].filter(Boolean).join(' ') || chatInfo.username || `Чат ${chatInfo.id}`) : null;
+
   return (
-    `📋 <b>[СЕКРЕТАРЬ • ПРОТОКОЛ СООБЩЕНИЯ]</b>\n` +
-    `👤 <b>Отправитель:</b> ${fullName}\n` +
+    `${isEdited ? '✏️' : '📋'} <b>[СЕКРЕТАРЬ • ${isEdited ? 'ИЗМЕНЕНО СООБЩЕНИЕ' : 'ПРОТОКОЛ ПЕРЕХВАТА'}]</b>\n` +
+    (chatTitle ? `💬 <b>Диалог:</b> ${chatTitle} (ID: <code>${chatInfo?.id}</code>)\n` : '') +
+    `👤 <b>Кто написал:</b> ${fullName}\n` +
     `🔖 <b>Никнейм:</b> ${username}\n` +
-    `🆔 <b>ID:</b> <code>${userId}</code>\n` +
-    `📅 <b>Дата и время:</b> ${dateStr} ${timeStr} (МСК)`
+    `🆔 <b>ID автора:</b> <code>${userId}</code>\n` +
+    `📅 <b>Когда:</b> ${dateStr} в ${timeStr} (МСК)`
   );
 }
 
@@ -48,19 +46,25 @@ bot.on('business_connection' as any, async (ctx: any) => {
     const businessUserId = conn?.user?.id;
     const businessUserName = conn?.user?.first_name || 'Владелец аккаунта';
 
-    console.log(`[BUSINESS_CONNECTION] Connection ID: ${conn?.id}, User: ${businessUserName} (${businessUserId}), Enabled: ${isEnabled}`);
+    if (conn?.id && businessUserId) {
+      connectionToOwner.set(conn.id, businessUserId);
+      registeredOwners.add(businessUserId);
+      lastKnownOwnerId = businessUserId;
+    }
+
+    console.log(`[BUSINESS_CONNECTION] ID: ${conn?.id}, User: ${businessUserName} (${businessUserId}), Enabled: ${isEnabled}`);
 
     if (isEnabled && businessUserId) {
       await ctx.telegram.sendMessage(
         businessUserId,
         `💼 <b>Режим Персонального Секретаря Telegram Business АКТИВИРОВАН!</b>\n\n` +
-        `✅ Бот подключен к вашему личному аккаунту Telegram.\n\n` +
-        `🛡 <b>Как это работает в чужих ЛС:</b>\n` +
-        `• Когда вам пишет собеседник или когда вы отвечаете ему — бот дублирует (копирует) сообщение.\n` +
-        `• Каждая копия сопровождается карточкой: <b>Кто написал, Когда написал, ID, Имя и Никнейм</b>.\n` +
-        `• В диалоге будет зафиксировано, что этим чатом управляет Персональный Секретарь.\n` +
-        `• 0 байт данных сохраняется на сервере (Stateless / Zero Retention).`
-        , { parse_mode: 'HTML' }
+        `✅ Бот успешно подключен к вашим личным диалогам.\n\n` +
+        `🛡 <b>Как теперь работает протоколирование:</b>\n` +
+        `• В чатах с вашими собеседниками бот <b>не спамит</b> и не мешает общению.\n` +
+        `• Все входящие сообщения от собеседников и ваши ответы перехватываются и пересылаются <b>СЮДА (в этот диалог с ботом)</b>.\n` +
+        `• К каждому сообщению прикрепляется карточка: <b>Кто написал, Когда написал, ID, Имя, Никнейм</b> и точная копия самого сообщения (текст, голос, фото, документ и др.).\n` +
+        `• 0 байт данных сохраняется на сторонних серверах (Stateless).`,
+        { parse_mode: 'HTML' }
       );
     }
   } catch (err: any) {
@@ -68,102 +72,82 @@ bot.on('business_connection' as any, async (ctx: any) => {
   }
 });
 
-// 2. Handle Telegram Business Messages (Сообщения в чужих ЛС: собеседника и самого пользователя)
+// 2. Handle business messages in external DMs (sender + user himself)
+// The bot forwards the card and native copyMessage to the OWNER'S DIRECT DM with the bot
 bot.on('business_message' as any, async (ctx: any) => {
   try {
     const bMsg = ctx.update.business_message;
     if (!bMsg) return;
 
     const businessConnectionId = bMsg.business_connection_id;
-    const chatId = bMsg.chat?.id;
+    const fromChat = bMsg.chat;
+    const fromChatId = fromChat?.id;
     const messageId = bMsg.message_id;
     const sender = bMsg.from;
     const senderName = sender?.first_name || 'Собеседник';
 
-    console.log(`[BUSINESS_MSG_RECV] Conn: ${businessConnectionId}, Chat: ${chatId}, From: ${senderName} (ID: ${sender?.id})`);
+    const targetOwnerId = connectionToOwner.get(businessConnectionId) || lastKnownOwnerId;
 
-    // Если в этот чат еще не отправлялось уведомление об управлении ботом — уведомляем
-    const noticeKey = `${businessConnectionId}_${chatId}`;
-    if (!announcedBusinessChats.has(noticeKey)) {
-      announcedBusinessChats.add(noticeKey);
-      try {
-        await ctx.telegram.sendMessage(
-          chatId,
-          `🤖 <i>Этим чатом управляет Персональный Секретарь Telegram. Все входящие и исходящие сообщения протоколируются и копируются.</i>`,
-          {
-            business_connection_id: businessConnectionId,
-            parse_mode: 'HTML',
-          } as any
-        );
-      } catch (noticeErr: any) {
-        console.warn('[BUSINESS_NOTICE_FAILED]', noticeErr?.message || noticeErr);
-      }
-    }
+    console.log(`[BUSINESS_MSG_RECV] Conn: ${businessConnectionId}, FromChat: ${fromChatId}, Sender: ${senderName} (ID: ${sender?.id}) -> TargetOwner: ${targetOwnerId}`);
 
-    // Игнорируем технические команды, если таковые будут
-    if (bMsg.text && bMsg.text.startsWith('/secretary_off')) {
+    if (!targetOwnerId) {
+      console.warn('[TARGET_OWNER_NOT_FOUND] Владелец не определен. Напишите /start боту в ЛС.');
       return;
     }
 
-    const header = formatMetadataHeader(sender, bMsg.date);
+    const header = formatMetadataHeader(sender, bMsg.date, fromChat, false);
     const startTime = Date.now();
 
-    // 1. Отправляем информационную подпись с деталями автора
-    await (ctx.telegram as any).sendMessage(chatId, header, {
-      business_connection_id: businessConnectionId,
+    // 1. Send metadata card to OWNER's DM with bot
+    await (ctx.telegram as any).sendMessage(targetOwnerId, header, {
       parse_mode: 'HTML',
     });
 
-    // 2. Моментальное нативное копирование сообщения в этот же бизнес-чат
-    await (ctx.telegram as any).copyMessage(chatId, chatId, messageId, {
-      business_connection_id: businessConnectionId,
-    });
+    // 2. Native copy of message directly to OWNER's DM with bot
+    await (ctx.telegram as any).copyMessage(targetOwnerId, fromChatId, messageId);
+
     const elapsed = Date.now() - startTime;
-    console.log(`[BUSINESS_MSG_COPIED] Message ID ${messageId} copied with metadata in business chat ${chatId} (${elapsed}ms). Memory purged.`);
+    console.log(`[BUSINESS_MSG_FORWARDED_TO_OWNER] Msg ID ${messageId} forwarded to owner ${targetOwnerId} (${elapsed}ms). Client chat kept clean!`);
   } catch (err: any) {
     console.error('[BUSINESS_MSG_ERROR]', err?.message || err);
   }
 });
 
-// 3. Handle Edited Business Messages (если сообщение отредактировано в ЛС)
+// 3. Handle edited business messages in external DMs
 bot.on('edited_business_message' as any, async (ctx: any) => {
   try {
     const bMsg = ctx.update.edited_business_message;
     if (!bMsg) return;
     const businessConnectionId = bMsg.business_connection_id;
-    const chatId = bMsg.chat?.id;
+    const fromChat = bMsg.chat;
+    const fromChatId = fromChat?.id;
     const messageId = bMsg.message_id;
     const sender = bMsg.from;
 
-    console.log(`[BUSINESS_MSG_EDITED] Chat: ${chatId}, Msg ID: ${messageId}`);
+    const targetOwnerId = connectionToOwner.get(businessConnectionId) || lastKnownOwnerId;
+    if (!targetOwnerId) return;
+
+    console.log(`[BUSINESS_MSG_EDITED] Chat: ${fromChatId}, Msg ID: ${messageId} -> TargetOwner: ${targetOwnerId}`);
+
+    const header = formatMetadataHeader(sender, bMsg.edit_date || bMsg.date, fromChat, true);
     
-    const header = `✏️ <b>[ИЗМЕНЕНО СООБЩЕНИЕ]</b>\n` + formatMetadataHeader(sender, bMsg.edit_date || bMsg.date);
-    await (ctx.telegram as any).sendMessage(chatId, header, {
-      business_connection_id: businessConnectionId,
+    await (ctx.telegram as any).sendMessage(targetOwnerId, header, {
       parse_mode: 'HTML',
     });
 
-    // Дублируем обновленную версию сообщения
-    await (ctx.telegram as any).copyMessage(chatId, chatId, messageId, {
-      business_connection_id: businessConnectionId,
-    });
+    await (ctx.telegram as any).copyMessage(targetOwnerId, fromChatId, messageId);
   } catch (err: any) {
     console.error('[EDITED_BUSINESS_MSG_ERROR]', err?.message || err);
   }
 });
 
-// 4. Strict Global Filter for Standard Messages: Process strictly private messages (DM) only
+// 4. Filter out group chats, only allow private chats
 bot.use(async (ctx, next) => {
   try {
-    // Пропускаем обновления бизнес-режима
     if ((ctx.update as any).business_connection || (ctx.update as any).business_message || (ctx.update as any).edited_business_message) {
       return await next();
     }
-
     if (!ctx.chat || ctx.chat.type !== 'private') {
-      if (ctx.chat) {
-        console.log(`[FILTER_DROP] Ignored message from non-DM chat (Type: ${ctx.chat.type}, ID: ${ctx.chat.id})`);
-      }
       return;
     }
     return await next();
@@ -172,48 +156,68 @@ bot.use(async (ctx, next) => {
   }
 });
 
-// 5. Command handlers in private DMs
+// 5. Bot direct DM commands
 bot.start(async (ctx) => {
-  return ctx.replyWithHTML(
-    `💼 <b>Привет, ${ctx.from?.first_name || 'пользователь'}!</b>\n\n` +
-    `Я — ваш <b>Персональный Секретарь</b> (поддержка личного диалога и <b>Telegram Business в чужих ЛС</b>).\n\n` +
-    `📌 <b>2 режима работы:</b>\n` +
-    `1️⃣ <b>Прямой диалог:</b> Отправьте мне любой файл, текст или аудио — я сделаю точную копию в этом чате.\n` +
-    `2️⃣ <b>Секретарь в чужих ЛС (Telegram Business):</b> Подключите меня в <i>Настройки Telegram → Telegram Business → Чат-боты</i>. Я буду автоматически копировать сообщения вашего собеседника и ваши ответы, а в чате будет уведомление, что им управляет бот.\n\n` +
-    `🔒 <i>Stateless: 0 байт данных сохраняется на сервере. Все копии хранятся только в Telegram.</i>`
-  );
+  try {
+    const userId = ctx.from?.id;
+    const userName = ctx.from?.first_name || 'пользователь';
+
+    if (userId) {
+      registeredOwners.add(userId);
+      lastKnownOwnerId = userId;
+    }
+
+    return await ctx.replyWithHTML(
+      `💼 <b>Привет, ${userName}!</b>\n\n` +
+      `Я — ваш <b>Персональный Секретарь Telegram</b>.\n\n` +
+      `📌 <b>Как это работает:</b>\n` +
+      `1️⃣ <b>Секретарь в чужих ЛС:</b> Подключите меня в <i>Настройки Telegram → Telegram Business → Чат-боты</i>. Все входящие и исходящие сообщения из ваших диалогов с клиентами/друзьями будут протоколироваться и пересылаться <b>СЮДА (в этот наш диалог)</b>.\n` +
+      `2️⃣ <b>Прямой диалог:</b> Отправьте мне сюда любую заметку или файл — я сохраню точную копию с метаданными.\n\n` +
+      `🛡 <b>В чатах с собеседниками бот ничего не пишет и не спамит!</b> Все протоколы и копии приходят только вам сюда.\n` +
+      `🔒 <i>Stateless / Zero Data Retention: данные не сохраняются на сторонних серверах.</i>`
+    );
+  } catch (err: any) {
+    console.error('[START_CMD_ERROR]', err?.message || err);
+  }
 });
 
 bot.help(async (ctx) => {
-  return ctx.replyWithHTML(
-    `ℹ️ <b>Справка Персонального Секретаря:</b>\n\n` +
-    `💼 <b>Как подключить бота к чужим ЛС через Telegram Business:</b>\n` +
-    `1. Откройте <b>Настройки Telegram</b> (требуется Telegram Premium / Business).\n` +
-    `2. Перейдите в раздел <b>Telegram для бизнеса → Чат-боты (Chatbots)</b>.\n` +
-    `3. Введите юзернейм этого бота и разрешите доступ к личным сообщениям.\n` +
-    `4. Теперь в любых чужих ЛС бот автоматически дублирует входящие и исходящие реплики, объявляя, что чатом управляет бот.\n\n` +
-    `⚙️ Доступные команды: /start, /help, /status`
-  );
+  try {
+    return await ctx.replyWithHTML(
+      `ℹ️ <b>Справка Персонального Секретаря:</b>\n\n` +
+      `💼 <b>Как подключить к чужим ЛС через Telegram Business:</b>\n` +
+      `1. Откройте <b>Настройки Telegram</b> (требуется Telegram Premium / Business).\n` +
+      `2. Перейдите в <b>Telegram для бизнеса → Чат-боты</b>.\n` +
+      `3. Введите юзернейм этого бота и включите доступ к личным чатам.\n` +
+      `4. Все сообщения из ваших личных диалогов будут мгновенно протоколироваться и дублироваться <b>в этот чат с ботом</b>.\n\n` +
+      `⚙️ Команды: /start, /help, /status`
+    );
+  } catch (err: any) {
+    console.error('[HELP_CMD_ERROR]', err?.message || err);
+  }
 });
 
 bot.command('status', async (ctx) => {
-  return ctx.replyWithHTML(
-    `⚡ <b>Статус:</b> Секретарь активен (Онлайн)\n` +
-    `🛡 <b>Режимы:</b> Private DM + Telegram Business (Чужие ЛС)\n` +
-    `📢 <b>Уведомление в чате:</b> Включено («Этим чатом управляет бот»)\n` +
-    `🧠 <b>Хранилище (State):</b> 0 KB (Stateless / Zero Data Retention)\n` +
-    `⏱ <b>Uptime:</b> ${process.uptime().toFixed(1)} сек.\n` +
-    `📦 <b>Node.js:</b> ${process.version}`
-  );
+  try {
+    return await ctx.replyWithHTML(
+      `⚡ <b>Статус:</b> Секретарь активен (Онлайн)\n` +
+      `🛡 <b>Режим:</b> Private DM + Telegram Business Forwarder\n` +
+      `📥 <b>Куда приходят логи:</b> В этот личный чат с ботом\n` +
+      `🧠 <b>Хранилище (State):</b> 0 KB (Stateless / Zero Data Retention)\n` +
+      `⏱ <b>Uptime:</b> ${process.uptime().toFixed(1)} сек.\n` +
+      `📦 <b>Node.js:</b> ${process.version}`
+    );
+  } catch (err: any) {
+    console.error('[STATUS_CMD_ERROR]', err?.message || err);
+  }
 });
 
-// 6. Main Message Handler for direct bot DM: copy message and discard state immediately
+// 6. Direct messages sent into bot DM
 bot.on('message', async (ctx) => {
   const message = ctx.message;
   if (!message) return;
 
-  // Ignore system slash commands to avoid re-duplicating /start, /help, etc.
-  if ('text' in message && message.text && message.text.startsWith('/')) {
+  if ('text' in message && message.text?.startsWith('/')) {
     return;
   }
 
@@ -222,19 +226,18 @@ bot.on('message', async (ctx) => {
   const sender = message.from;
   const startTime = Date.now();
 
+  if (sender?.id) {
+    registeredOwners.add(sender.id);
+    lastKnownOwnerId = sender.id;
+  }
+
   try {
-    // Если пользователь впервые пишет в ЛС боту, можно вывести плашку
-    if (!greetedPrivateChats.has(chatId)) {
-      greetedPrivateChats.add(chatId);
-      await ctx.replyWithHTML(`🤖 <i>Этим чатом управляет Персональный Секретарь. Протоколирую сообщение...</i>`);
-    }
+    const header = formatMetadataHeader(sender, message.date, null, false);
 
-    const header = formatMetadataHeader(sender, message.date);
-
-    // 1. Отправляем детальную карточку-подпись
+    // 1. Отправляем детальную карточку-подпись в чат с ботом
     await ctx.replyWithHTML(header);
 
-    // 2. Native copyMessage preserves all media formats, captions, formatting, and stickers
+    // 2. Нативное копирование сообщения в тот же чат
     await ctx.telegram.copyMessage(chatId, chatId, messageId);
     const elapsed = Date.now() - startTime;
     console.log(`[DM_COPIED] Message ID ${messageId} mirrored with metadata in ${elapsed}ms. State purged.`);
@@ -247,46 +250,39 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Enable JSON body parser for incoming Webhook requests
   app.use(express.json());
 
-  // Health check & Bot status endpoint (GET /api/bot)
-  app.get('/api/bot', (req, res) => {
-    res.json({
-      status: 'ok',
-      service: 'Personal Secretary Telegram Bot (Stateless DM Mirror)',
-      stateless: true,
-      timestamp: new Date().toISOString(),
-      uptime_seconds: process.uptime(),
-      message: 'Telegram Webhook endpoint is active and listening for POST updates.'
-    });
-  });
-
-  // Health check endpoint (GET /api/health)
-  app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', uptime: process.uptime() });
-  });
-
-  // Telegram Webhook receiver endpoint (POST /api/bot)
+  // Webhook endpoint
   app.post('/api/bot', async (req, res) => {
     try {
       if (req.body && typeof req.body === 'object') {
         await bot.handleUpdate(req.body);
       }
     } catch (err) {
-      console.error('[WEBHOOK_HANDLE_ERROR]', err);
+      console.error('[EXPRESS_WEBHOOK_ERROR]', err);
     } finally {
-      // INSTANT ACK: Always respond 200 OK immediately to Telegram
       if (!res.headersSent) {
         res.status(200).end();
       }
     }
   });
 
-  // Vite development middleware or production static files
+  // Health check
+  app.get('/api/bot', (req, res) => {
+    res.json({
+      status: 'ok',
+      service: 'Personal Secretary Telegram Bot (Business Forwarder to Bot DM)',
+      stateless: true,
+      business_support: true,
+      ready: true,
+      timestamp: new Date().toISOString(),
+      uptime_seconds: process.uptime(),
+    });
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true, host: '0.0.0.0' },
+      server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -299,8 +295,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
-    console.log(`Telegram Bot Webhook endpoint ready at http://0.0.0.0:${PORT}/api/bot`);
+    console.log(`[SERVER_RUNNING] Personal Secretary Server started on port ${PORT}`);
   });
 }
 

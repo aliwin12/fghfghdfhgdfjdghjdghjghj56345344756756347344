@@ -1,5 +1,5 @@
 import React from 'react';
-import { Zap, Shield, Cpu, RefreshCw, Database, CheckCircle, ArrowRight, Activity, Copy, EyeOff, Lock } from 'lucide-react';
+import { Zap, Cpu, RefreshCw, CheckCircle, ArrowRight, Copy, EyeOff, Lock, UserCheck, ShieldCheck } from 'lucide-react';
 
 export const ArchitectureSection: React.FC = () => {
   return (
@@ -12,10 +12,10 @@ export const ArchitectureSection: React.FC = () => {
           </div>
           <div>
             <h2 className="text-xl font-bold text-white tracking-tight">
-              Архитектура Stateless Секретаря: Приватность и Zero Retention
+              Архитектура: Приватное протоколирование в ваш личный чат с Ботом
             </h2>
             <p className="text-sm text-slate-300 mt-2 leading-relaxed">
-              Бот работает по бессерверной модели: моментально обрабатывает входящие личные сообщения пользователя, выполняет нативное дублирование <code>copyMessage</code> в диалог Telegram и мгновенно завершает выполнение без сохранения данных в памяти или внешней БД.
+              Бот перехватывает сообщения из диалогов с собеседниками через Telegram Business. При этом в чатах с клиентами <b>нет спама</b>, а подробный протокол с автором, ID, временем и точной копией реплики моментально пересылается <b>в ваш личный чат с Ботом</b>.
             </p>
           </div>
         </div>
@@ -23,38 +23,37 @@ export const ArchitectureSection: React.FC = () => {
 
       {/* 4 Architectural Columns */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Card 1: Direct Private DM Filtering */}
+        {/* Card 1: Forwarding to Owner DM */}
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
           <div>
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
-                <Lock className="w-5 h-5 text-blue-400" />
+                <UserCheck className="w-5 h-5 text-blue-400" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-white">1. Строгий фильтр личных сообщений</h3>
-                <span className="text-xs text-blue-400 font-mono">ctx.chat.type === 'private'</span>
+                <h3 className="text-base font-bold text-white">1. Пересылка в ЛС владельца с ботом</h3>
+                <span className="text-xs text-blue-400 font-mono">Owner DM Target Routing</span>
               </div>
             </div>
 
             <p className="text-xs text-slate-300 leading-relaxed mb-4">
-              Бот работает исключительно в режиме персонального секретаря. Группы, супергруппы и каналы игнорируются на ранней стадии обработки запроса:
+              Бот не пишет в чат с клиентом или собеседником, чтобы не засорять переписку. Все входящие и исходящие реплики аккуратно направляются в ваш приватный диалог с ботом:
             </p>
 
-            <div className="bg-slate-950 rounded-xl p-3.5 border border-slate-800 font-mono text-xs text-slate-300 space-y-1.5 mb-4">
-              <div className="text-blue-400 font-semibold">// Изоляция личного пространства:</div>
-              <div className="text-slate-300">if (ctx.chat.type !== 'private') &#123;</div>
-              <div className="pl-4 text-slate-400">return; // Никаких действий вне ЛС</div>
-              <div className="text-slate-300">&#125;</div>
+            <div className="bg-slate-950 rounded-xl p-3.5 border border-slate-800 font-mono text-xs text-slate-300 space-y-1 mb-4">
+              <div className="text-blue-400 font-semibold">// Отправка протокола и копии владельцу:</div>
+              <div className="text-slate-300">await ctx.telegram.sendMessage(ownerId, protocolCard);</div>
+              <div className="text-slate-300">await ctx.telegram.copyMessage(ownerId, fromChatId, msgId);</div>
             </div>
 
             <ul className="space-y-2 text-xs text-slate-400">
               <li className="flex items-start gap-2">
                 <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <span>Защита от случайного добавления бота в публичные чаты.</span>
+                <span>Чат с собеседником остается на 100% чистым и естественным.</span>
               </li>
               <li className="flex items-start gap-2">
                 <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <span>Исключительный фокус на персональном диалоге с пользователем.</span>
+                <span>У вас всегда под рукой единый журнал всех переписок.</span>
               </li>
             </ul>
           </div>
@@ -68,20 +67,19 @@ export const ArchitectureSection: React.FC = () => {
                 <Copy className="w-5 h-5 text-amber-400" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-white">2. Нативный движок copyMessage</h3>
-                <span className="text-xs text-amber-400 font-mono">Telegram Bot API copyMessage</span>
+                <h3 className="text-base font-bold text-white">2. Полные метаданные + Нативная копия</h3>
+                <span className="text-xs text-amber-400 font-mono">Metadata Card + copyMessage</span>
               </div>
             </div>
 
             <p className="text-xs text-slate-300 leading-relaxed mb-4">
-              Вместо отправки текста вручную используется официальный метод <code>copyMessage</code>, который дублирует любые медиа, форматирование, стикеры и документы без ярлыка «Переслано»:
+              Перед каждым скопированным сообщением бот отправляет карточку с именем, фамилией, никнеймом, Telegram ID, датой и названием диалога:
             </p>
 
-            <div className="bg-slate-950 rounded-xl p-3.5 border border-slate-800 font-mono text-xs text-slate-300 space-y-1.5 mb-4">
-              <div className="text-amber-400 font-semibold">// Точная копия в этот же чат:</div>
-              <div className="text-slate-300">
-                await ctx.telegram.copyMessage(chat.id, chat.id, message.message_id);
-              </div>
+            <div className="bg-slate-950 rounded-xl p-3.5 border border-slate-800 font-mono text-xs text-slate-300 space-y-1 mb-4">
+              <div className="text-amber-400 font-semibold">// Карточка протокола:</div>
+              <div className="text-slate-300">👤 Кто написал: Алексей Смирнов (@alex_client)</div>
+              <div className="text-slate-300">🆔 ID автора: 512940182 | 📅 Время: 14:20 (МСК)</div>
             </div>
 
             <ul className="space-y-2 text-xs text-slate-400">
@@ -91,7 +89,7 @@ export const ArchitectureSection: React.FC = () => {
               </li>
               <li className="flex items-start gap-2">
                 <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <span>Копия сохраняется в истории чата Telegram навсегда.</span>
+                <span>Сохраняются даже удаленные собеседником реплики.</span>
               </li>
             </ul>
           </div>
@@ -111,7 +109,7 @@ export const ArchitectureSection: React.FC = () => {
             </div>
 
             <p className="text-xs text-slate-300 leading-relaxed mb-4">
-              Бот не использует базы данных (PostgreSQL, MongoDB, Redis) и не сохраняет историю в глобальных массивах:
+              Бот не использует внешние базы данных и не сохраняет историю переписок на серверах:
             </p>
 
             <div className="bg-slate-950 rounded-xl p-3.5 border border-slate-800 font-mono text-xs text-slate-300 mb-4">
@@ -121,7 +119,7 @@ export const ArchitectureSection: React.FC = () => {
             </div>
 
             <p className="text-xs text-slate-400">
-              Как только вызов завершается, локальные переменные уничтожаются сборщиком мусора V8. Бот не оставляет никаких следов контента на сервере.
+              Вся переписка хранится исключительно внутри защищенной инфраструктуры Telegram в вашем личном чате.
             </p>
           </div>
         </div>
@@ -134,26 +132,26 @@ export const ArchitectureSection: React.FC = () => {
                 <Zap className="w-5 h-5 text-indigo-400" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-white">4. Мгновенная скорость отклика</h3>
+                <h3 className="text-base font-bold text-white">4. Мгновенная скорость пересылки</h3>
                 <span className="text-xs text-indigo-400 font-mono">15–40 мс время выполнения</span>
               </div>
             </div>
 
             <p className="text-xs text-slate-300 leading-relaxed mb-3">
-              Благодаря отсутствию дисковых операций и обращений к сторонним СУБД, копирование происходит практически без задержки:
+              Благодаря Serverless-обработке сообщение пересылается в диалог с ботом буквально в ту же секунду:
             </p>
 
             <div className="space-y-1.5 font-mono text-[11px] mb-4">
               <div className="bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 text-blue-300">
-                [SECRETARY_RECV] Получено личное сообщение
+                [BUSINESS_MSG_RECV] Сообщение в чате с клиентом
               </div>
               <div className="bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 text-emerald-300">
-                [SECRETARY_COPIED] Сообщение продублировано за 18ms
+                [FORWARDED_TO_OWNER] Протокол + копия в ЛС с ботом за 16ms
               </div>
             </div>
 
             <p className="text-xs text-slate-400">
-              Пользователь получает надежный дубликат сообщения в реальном времени с минимальным потреблением трафика.
+              Полный контроль над всеми диалогами в одном приватном чате.
             </p>
           </div>
         </div>
@@ -170,8 +168,8 @@ export const ArchitectureSection: React.FC = () => {
           {/* Step 1 */}
           <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 text-center">
             <div className="text-[10px] font-bold uppercase text-slate-500 mb-1">Шаг 1</div>
-            <div className="font-semibold text-white text-xs mb-1">Пользователь пишет в ЛС</div>
-            <div className="text-[11px] text-slate-400">Текст, фото, голос, файл</div>
+            <div className="font-semibold text-white text-xs mb-1">Сообщение в чужом ЛС</div>
+            <div className="text-[11px] text-slate-400">Клиент пишет вам или вы клиенту</div>
           </div>
 
           <div className="flex justify-center text-slate-600 md:rotate-0 rotate-90">
@@ -181,8 +179,8 @@ export const ArchitectureSection: React.FC = () => {
           {/* Step 2 */}
           <div className="bg-slate-950 p-4 rounded-xl border border-blue-500/30 text-center shadow-lg shadow-blue-500/5">
             <div className="text-[10px] font-bold uppercase text-blue-400 mb-1">Шаг 2</div>
-            <div className="font-semibold text-white text-xs mb-1">Serverless Function</div>
-            <div className="text-[11px] text-slate-400">copyMessage(chat.id, chat.id)</div>
+            <div className="font-semibold text-white text-xs mb-1">Serverless Перехват</div>
+            <div className="text-[11px] text-slate-400">Чат клиента не трогаем</div>
           </div>
 
           <div className="flex justify-center text-slate-600 md:rotate-0 rotate-90">
@@ -192,8 +190,8 @@ export const ArchitectureSection: React.FC = () => {
           {/* Step 3 */}
           <div className="bg-slate-950 p-4 rounded-xl border border-emerald-500/30 text-center shadow-lg shadow-emerald-500/5">
             <div className="text-[10px] font-bold uppercase text-emerald-400 mb-1">Шаг 3</div>
-            <div className="font-semibold text-white text-xs mb-1">Копия создана & Очистка</div>
-            <div className="text-[11px] text-slate-400">Сообщение в чате, память: 0 KB</div>
+            <div className="font-semibold text-white text-xs mb-1">Доставка в ЛС с Ботом</div>
+            <div className="text-[11px] text-slate-400">Протокол + копия у вас в ЛС</div>
           </div>
         </div>
       </div>

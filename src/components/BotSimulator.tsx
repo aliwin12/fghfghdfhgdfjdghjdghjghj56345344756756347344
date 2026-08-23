@@ -1,9 +1,8 @@
 import React, { useState } from 'react';
-import { Send, Bot, User, CheckCircle, Clock, Zap, ArrowRight, Shield, RefreshCw, Copy, Trash2, FileText, Image, Mic, Briefcase, UserCheck, Tag, Calendar, AtSign, Hash } from 'lucide-react';
+import { Send, Bot, User, Zap, RefreshCw, Trash2, FileText, Image, Mic, Briefcase, UserCheck, Tag, ExternalLink, ShieldCheck, Check, MessageSquare, ArrowRight } from 'lucide-react';
 
 export const BotSimulator: React.FC = () => {
-  const [mode, setMode] = useState<'business' | 'direct'>('business');
-  const [userName, setUserName] = useState('Владимир');
+  const [userName, setUserName] = useState('Владимир (Владелец)');
   const [userHandle, setUserHandle] = useState('vladimir_ceo');
   const [userId, setUserId] = useState('849201948');
 
@@ -15,51 +14,86 @@ export const BotSimulator: React.FC = () => {
   const [messageType, setMessageType] = useState<'text' | 'photo' | 'document' | 'voice'>('text');
   const [messageText, setMessageText] = useState('Здравствуйте! Отправляю коммерческое предложение по проекту.');
 
-  const [chatHistory, setChatHistory] = useState<Array<{
+  // Chat 1: Conversation with Interlocutor (Clean, no bot spam)
+  const [clientChatHistory, setClientChatHistory] = useState<Array<{
     id: number;
-    sender: 'interlocutor' | 'user' | 'bot_notice' | 'bot_metadata' | 'bot_copy_interlocutor' | 'bot_copy_user';
-    type: 'text' | 'photo' | 'document' | 'voice' | 'system' | 'metadata';
+    sender: 'interlocutor' | 'user';
+    type: 'text' | 'photo' | 'document' | 'voice';
     content: string;
     caption?: string;
-    senderName?: string;
-    senderHandle?: string;
-    senderId?: string;
+    senderName: string;
     timestamp: string;
   }>>([
     {
       id: 1,
-      sender: 'bot_notice',
-      type: 'system',
-      content: '🤖 Этим чатом управляет Персональный Секретарь Telegram. Все входящие и исходящие сообщения протоколируются и копируются.',
-      timestamp: '14:19',
-    },
-    {
-      id: 2,
       sender: 'interlocutor',
       type: 'text',
       content: 'Владимир, добрый день! Согласовали договор с юристами.',
       senderName: 'Алексей Смирнов',
-      senderHandle: 'alex_client',
-      senderId: '512940182',
       timestamp: '14:20',
     },
     {
-      id: 3,
-      sender: 'bot_metadata',
-      type: 'metadata',
-      content: '📋 ПРОТОКОЛ СООБЩЕНИЯ',
-      senderName: 'Алексей Смирнов',
-      senderHandle: 'alex_client',
-      senderId: '512940182',
-      timestamp: '14:20',
-    },
-    {
-      id: 4,
-      sender: 'bot_copy_interlocutor',
+      id: 2,
+      sender: 'user',
       type: 'text',
+      content: 'Отлично, высылаю подписанную копию с печатями!',
+      senderName: 'Владимир',
+      timestamp: '14:21',
+    },
+  ]);
+
+  // Chat 2: Secretary Bot Private DM (Where logs & message copies arrive!)
+  const [botChatHistory, setBotChatHistory] = useState<Array<{
+    id: number;
+    type: 'welcome' | 'protocol' | 'copy';
+    authorName?: string;
+    authorHandle?: string;
+    authorId?: string;
+    chatTitle?: string;
+    msgType?: 'text' | 'photo' | 'document' | 'voice';
+    content?: string;
+    caption?: string;
+    timestamp: string;
+  }>>([
+    {
+      id: 101,
+      type: 'welcome',
+      content: '💼 Режим Персонального Секретаря Telegram Business АКТИВИРОВАН! Все сообщения из ваших личных диалогов будут протоколироваться и пересылаться СЮДА. В чатах с собеседниками бот ничего не пишет.',
+      timestamp: '14:00',
+    },
+    {
+      id: 102,
+      type: 'protocol',
+      authorName: 'Алексей Смирнов',
+      authorHandle: 'alex_client',
+      authorId: '512940182',
+      chatTitle: 'Алексей Смирнов (Клиент)',
+      timestamp: '14:20:12',
+    },
+    {
+      id: 103,
+      type: 'copy',
+      msgType: 'text',
       content: 'Владимир, добрый день! Согласовали договор с юристами.',
-      senderName: 'Алексей Смирнов',
+      authorName: 'Алексей Смирнов',
       timestamp: '14:20',
+    },
+    {
+      id: 104,
+      type: 'protocol',
+      authorName: 'Владимир',
+      authorHandle: 'vladimir_ceo',
+      authorId: '849201948',
+      chatTitle: 'Алексей Смирнов (Клиент)',
+      timestamp: '14:21:05',
+    },
+    {
+      id: 105,
+      type: 'copy',
+      msgType: 'text',
+      content: 'Отлично, высылаю подписанную копию с печатями!',
+      authorName: 'Владимир',
+      timestamp: '14:21',
     },
   ]);
 
@@ -72,88 +106,86 @@ export const BotSimulator: React.FC = () => {
 
     const now = new Date();
     const timeStr = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const fullTimeStr = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const newMsgId = Date.now();
-    
+
     const isInterlocutor = currentSender === 'interlocutor';
     const activeSenderName = isInterlocutor ? interlocutorName : userName;
     const activeSenderHandle = isInterlocutor ? interlocutorHandle : userHandle;
     const activeSenderId = isInterlocutor ? interlocutorId : userId;
 
-    // Step 1: Add original message
-    const origMsg = {
+    // 1. Add message to client chat (clean conversation)
+    const clientMsg = {
       id: newMsgId,
       sender: currentSender,
       type: messageType,
       content: messageText,
       caption: messageType === 'photo' ? messageText : undefined,
-      senderName: isInterlocutor ? interlocutorName : `Вы (${userName})`,
-      senderHandle: activeSenderHandle,
-      senderId: activeSenderId,
+      senderName: isInterlocutor ? interlocutorName : userName,
       timestamp: timeStr,
     };
 
-    setChatHistory((prev) => [...prev, origMsg]);
+    setClientChatHistory((prev) => [...prev, clientMsg]);
     setLogs([]);
 
-    // Telemetry Step 1
+    // Telemetry Step 1: Intercept update
     setTimeout(() => {
       setLogs((prev) => [
         ...prev,
-        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [TELEGRAM_UPDATE] Update: business_message (chat: 749102, sender: "${activeSenderName}", ID: ${activeSenderId}, @${activeSenderHandle})`,
+        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [TELEGRAM_BUSINESS] Update: business_message (chat: 749102, sender: "${activeSenderName}", @${activeSenderHandle})`,
+        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [FILTER] Чат клиента остается чистым (0 лишних сообщений собеседнику).`,
       ]);
-    }, 100);
+    }, 120);
 
-    // Telemetry Step 2: Metadata Protocol Card
+    // Telemetry Step 2: Protocol Card sent to BOT DM
     setTimeout(() => {
-      const metaMsg = {
+      const protocolItem = {
         id: newMsgId + 1,
-        sender: 'bot_metadata' as const,
-        type: 'metadata' as const,
-        content: '📋 ПРОТОКОЛ СООБЩЕНИЯ',
-        senderName: activeSenderName,
-        senderHandle: activeSenderHandle,
-        senderId: activeSenderId,
-        timestamp: timeStr,
+        type: 'protocol' as const,
+        authorName: activeSenderName,
+        authorHandle: activeSenderHandle,
+        authorId: activeSenderId,
+        chatTitle: `${interlocutorName} (Клиент)`,
+        timestamp: fullTimeStr,
       };
 
-      setChatHistory((prev) => [...prev, metaMsg]);
+      setBotChatHistory((prev) => [...prev, protocolItem]);
       setLogs((prev) => [
         ...prev,
-        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [PROTOCOL_HEADER] Отправлена карточка: Отправитель: "${activeSenderName}", Никнейм: "@${activeSenderHandle}", ID: ${activeSenderId}`,
+        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [FORWARD_TO_BOT_DM] Отправлен протокол в ЛС Владельца: Автор="${activeSenderName}", Ник="@${activeSenderHandle}", ID=${activeSenderId}`,
       ]);
-    }, 250);
+    }, 280);
 
-    // Telemetry Step 3: copyMessage execution
+    // Telemetry Step 3: Native copyMessage to BOT DM
     setTimeout(() => {
-      const copyMsg = {
+      const copyItem = {
         id: newMsgId + 2,
-        sender: isInterlocutor ? ('bot_copy_interlocutor' as const) : ('bot_copy_user' as const),
-        type: messageType,
+        type: 'copy' as const,
+        msgType: messageType,
         content: messageText,
         caption: messageType === 'photo' ? messageText : undefined,
-        senderName: isInterlocutor ? interlocutorName : `Вы (${userName})`,
+        authorName: activeSenderName,
         timestamp: timeStr,
       };
 
-      setChatHistory((prev) => [...prev, copyMsg]);
-
+      setBotChatHistory((prev) => [...prev, copyItem]);
       setLogs((prev) => [
         ...prev,
-        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [SECRETARY_COPY] copyMessage(chat_id, chat_id, ${newMsgId}) -> Точная копия в чате.`,
-        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [STATELESS_PURGE] Память сервера очищена (0 байт в БД). Сообщение зафиксировано в Telegram.`,
-        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [HTTP_200_OK] Webhook ACK отправлен за 16ms.`,
+        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [COPY_MESSAGE] copyMessage(target: Owner_DM, from: ClientChat, msgId: ${newMsgId}) -> Точная копия доставлена в ЛС с ботом.`,
+        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [STATELESS_PURGE] Память сервера очищена (0 байт в БД).`,
+        `[${new Date().toISOString().split('T')[1].slice(0, 8)}] [HTTP_200_OK] Webhook ACK отправлен Telegram за 14ms.`,
       ]);
       setIsSimulating(false);
-    }, 480);
+    }, 520);
   };
 
   const clearChat = () => {
-    setChatHistory([
+    setClientChatHistory([]);
+    setBotChatHistory([
       {
         id: Date.now(),
-        sender: 'bot_notice',
-        type: 'system',
-        content: '🤖 Этим чатом управляет Персональный Секретарь Telegram. Все входящие и исходящие сообщения протоколируются и копируются.',
+        type: 'welcome',
+        content: '💼 Режим Персонального Секретаря Telegram Business АКТИВИРОВАН! Все сообщения из ваших личных диалогов протоколируются и пересылаются СЮДА.',
         timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
       }
     ]);
@@ -162,77 +194,67 @@ export const BotSimulator: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Intro */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h2 className="text-lg font-bold text-white flex items-center gap-2">
-              <Briefcase className="w-5 h-5 text-blue-400" />
-              Интерактивный симулятор: Секретарь с полной подписью автора
-            </h2>
-            <p className="text-xs text-slate-400 mt-1">
-              Бот перехватывает сообщения, подписывает <b>Кто написал, Когда написал, ID, Имя и Никнейм</b> и сразу прикрепляет точную копию сообщения.
+      {/* Banner explaining the architecture */}
+      <div className="bg-gradient-to-r from-blue-950/70 via-indigo-950/50 to-slate-900 border border-blue-500/30 rounded-2xl p-5 shadow-xl">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="bg-blue-500 text-white text-[11px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
+                Логика работы
+              </span>
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                Секретарь пишет ТОЛЬКО в ваш личный чат с Ботом
+              </h2>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed max-w-3xl">
+              В диалоге с клиентом сохраняется чистая естественная беседа. Бот перехватывает каждую реплику и пересылает подробный протокол с точной копией сообщения в ваш <b>личный чат с ботом</b>.
             </p>
           </div>
-          <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 self-start sm:self-auto">
-            <button
-              onClick={() => setMode('business')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                mode === 'business'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Telegram Business (Чужие ЛС)
-            </button>
-            <button
-              onClick={() => setMode('direct')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                mode === 'direct'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Прямой чат с ботом (DM)
-            </button>
+          <div className="flex items-center gap-2 bg-slate-950/80 px-3 py-2 rounded-xl border border-slate-800 text-xs text-emerald-400 font-semibold shrink-0">
+            <ShieldCheck className="w-4 h-4 text-emerald-400" />
+            <span>0 спама клиенту • 100% приватность</span>
           </div>
         </div>
       </div>
 
+      {/* Main Grid: Control Panel + Dual Chat Screens */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Input Parameters (Left Column) */}
-        <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+        
+        {/* Left Column: Message Dispatcher & Author Controls (4 cols) */}
+        <div className="lg:col-span-4 bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-xl">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
               <Zap className="w-4 h-4 text-amber-400" />
-              1. Данные автора и текст
+              1. Симуляция реплики
             </h3>
             <span className="text-[10px] text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
-              {mode === 'business' ? 'Telegram Business Режим' : 'Прямой DM'}
+              Telegram Business
             </span>
           </div>
 
-          {/* Sender Switcher */}
+          {/* Sender Toggle */}
           <div>
-            <label className="block text-xs text-slate-400 mb-1.5 font-medium">Кто отправляет сообщение?</label>
+            <label className="block text-xs font-semibold text-slate-400 mb-1.5">Кто отправляет сообщение?</label>
             <div className="grid grid-cols-2 gap-2">
               <button
+                type="button"
                 onClick={() => setCurrentSender('interlocutor')}
-                className={`py-2 px-3 text-xs rounded-xl font-medium transition flex items-center justify-center gap-2 border ${
+                className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition-all ${
                   currentSender === 'interlocutor'
-                    ? 'bg-amber-600/20 text-amber-300 border-amber-500/40 shadow-sm'
-                    : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
+                    ? 'bg-amber-500/20 border-amber-500 text-amber-300 shadow-md'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
                 }`}
               >
                 <User className="w-3.5 h-3.5" />
-                <span>Собеседник (Клиент)</span>
+                <span>Собеседник</span>
               </button>
               <button
+                type="button"
                 onClick={() => setCurrentSender('user')}
-                className={`py-2 px-3 text-xs rounded-xl font-medium transition flex items-center justify-center gap-2 border ${
+                className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition-all ${
                   currentSender === 'user'
-                    ? 'bg-blue-600/20 text-blue-300 border-blue-500/40 shadow-sm'
-                    : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
+                    ? 'bg-blue-500/20 border-blue-500 text-blue-300 shadow-md'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
                 }`}
               >
                 <UserCheck className="w-3.5 h-3.5" />
@@ -241,16 +263,16 @@ export const BotSimulator: React.FC = () => {
             </div>
           </div>
 
-          {/* Details of Interlocutor / User */}
+          {/* Sender Details Form */}
           {currentSender === 'interlocutor' ? (
-            <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800 space-y-2">
+            <div className="bg-slate-950 p-3 rounded-xl border border-amber-500/30 space-y-2">
               <div className="text-[11px] font-semibold text-amber-400 flex items-center gap-1.5">
                 <User className="w-3.5 h-3.5" />
-                <span>Метаданные Собеседника (Клиента):</span>
+                <span>Данные Собеседника (Клиента):</span>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-[10px] text-slate-400 mb-0.5">Имя и Фамилия</label>
+                  <label className="block text-[10px] text-slate-400 mb-0.5">Имя</label>
                   <input
                     type="text"
                     value={interlocutorName}
@@ -259,7 +281,7 @@ export const BotSimulator: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] text-slate-400 mb-0.5">Никнейм (@username)</label>
+                  <label className="block text-[10px] text-slate-400 mb-0.5">Никнейм</label>
                   <input
                     type="text"
                     value={interlocutorHandle}
@@ -279,14 +301,14 @@ export const BotSimulator: React.FC = () => {
               </div>
             </div>
           ) : (
-            <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800 space-y-2">
+            <div className="bg-slate-950 p-3 rounded-xl border border-blue-500/30 space-y-2">
               <div className="text-[11px] font-semibold text-blue-400 flex items-center gap-1.5">
                 <UserCheck className="w-3.5 h-3.5" />
-                <span>Ваши метаданные (Владельца):</span>
+                <span>Ваши данные (Владельца):</span>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-[10px] text-slate-400 mb-0.5">Имя и Фамилия</label>
+                  <label className="block text-[10px] text-slate-400 mb-0.5">Имя</label>
                   <input
                     type="text"
                     value={userName}
@@ -295,7 +317,7 @@ export const BotSimulator: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] text-slate-400 mb-0.5">Никнейм (@username)</label>
+                  <label className="block text-[10px] text-slate-400 mb-0.5">Никнейм</label>
                   <input
                     type="text"
                     value={userHandle}
@@ -316,57 +338,87 @@ export const BotSimulator: React.FC = () => {
             </div>
           )}
 
+          {/* Message Type */}
           <div>
-            <label className="block text-xs text-slate-400 mb-1">Тип вложения / сообщения</label>
+            <label className="block text-xs font-semibold text-slate-400 mb-1.5">Формат сообщения</label>
             <div className="grid grid-cols-4 gap-1.5">
-              {[
-                { id: 'text', label: 'Текст', icon: FileText },
-                { id: 'photo', label: 'Фото', icon: Image },
-                { id: 'document', label: 'Файл', icon: FileText },
-                { id: 'voice', label: 'Голос', icon: Mic },
-              ].map((t) => {
-                const Icon = t.icon;
-                return (
-                  <button
-                    key={t.id}
-                    onClick={() => setMessageType(t.id as any)}
-                    className={`py-1.5 px-2 text-xs rounded-lg font-medium transition flex items-center justify-center gap-1 ${
-                      messageType === t.id
-                        ? 'bg-blue-600 text-white shadow-sm'
-                        : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
-                    }`}
-                  >
-                    <Icon className="w-3 h-3" />
-                    <span>{t.label}</span>
-                  </button>
-                );
-              })}
+              <button
+                type="button"
+                onClick={() => setMessageType('text')}
+                className={`p-2 rounded-lg border text-center text-xs font-medium flex flex-col items-center gap-1 transition-all ${
+                  messageType === 'text'
+                    ? 'bg-blue-600 border-blue-500 text-white shadow-md'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <FileText className="w-4 h-4" />
+                <span className="text-[10px]">Текст</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMessageType('photo')}
+                className={`p-2 rounded-lg border text-center text-xs font-medium flex flex-col items-center gap-1 transition-all ${
+                  messageType === 'photo'
+                    ? 'bg-blue-600 border-blue-500 text-white shadow-md'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Image className="w-4 h-4" />
+                <span className="text-[10px]">Фото</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMessageType('document')}
+                className={`p-2 rounded-lg border text-center text-xs font-medium flex flex-col items-center gap-1 transition-all ${
+                  messageType === 'document'
+                    ? 'bg-blue-600 border-blue-500 text-white shadow-md'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Briefcase className="w-4 h-4" />
+                <span className="text-[10px]">Файл</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMessageType('voice')}
+                className={`p-2 rounded-lg border text-center text-xs font-medium flex flex-col items-center gap-1 transition-all ${
+                  messageType === 'voice'
+                    ? 'bg-blue-600 border-blue-500 text-white shadow-md'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Mic className="w-4 h-4" />
+                <span className="text-[10px]">Голос</span>
+              </button>
             </div>
           </div>
 
+          {/* Content input */}
           <div>
-            <label className="block text-xs text-slate-400 mb-1">
-              Текст или реплика в диалоге
+            <label className="block text-xs font-semibold text-slate-400 mb-1">
+              {messageType === 'text' ? 'Текст сообщения' : 'Подпись к файлу'}
             </label>
             <textarea
-              rows={3}
+              rows={2}
               value={messageText}
               onChange={(e) => setMessageText(e.target.value)}
-              placeholder="Введите текст сообщения..."
-              className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-xs font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none"
+              placeholder="Напишите реплику..."
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white text-xs placeholder-slate-500 focus:ring-2 focus:ring-blue-500 focus:outline-none"
             />
           </div>
 
-          <div className="pt-2 border-t border-slate-800 space-y-2">
+          {/* Action button */}
+          <div className="pt-2">
             <button
+              type="button"
               onClick={runSimulation}
-              disabled={isSimulating}
-              className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 transition"
+              disabled={isSimulating || (!messageText && messageType === 'text')}
+              className="w-full py-3 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 text-white rounded-xl font-bold text-xs shadow-lg shadow-blue-500/20 flex items-center justify-center gap-2 transition-all"
             >
               {isSimulating ? (
                 <>
                   <RefreshCw className="w-4 h-4 animate-spin" />
-                  <span>Протоколирование с подписью автора...</span>
+                  <span>Перехват и пересылка в ЛС с ботом...</span>
                 </>
               ) : (
                 <>
@@ -375,81 +427,185 @@ export const BotSimulator: React.FC = () => {
                 </>
               )}
             </button>
+          </div>
 
-            <button
-              onClick={clearChat}
-              className="w-full py-1.5 text-slate-500 hover:text-slate-300 text-[11px] flex items-center justify-center gap-1 transition"
-            >
-              <Trash2 className="w-3 h-3" />
-              <span>Очистить диалог</span>
-            </button>
+          {/* Real-time server telemetry */}
+          <div className="pt-2 border-t border-slate-800">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[11px] font-semibold text-slate-400">Телеметрия Serverless Webhook:</span>
+              <button
+                type="button"
+                onClick={clearChat}
+                className="text-[10px] text-slate-500 hover:text-rose-400 flex items-center gap-1"
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>Очистить</span>
+              </button>
+            </div>
+            <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800/80 font-mono text-[10px] text-slate-400 max-h-36 overflow-y-auto space-y-1">
+              {logs.length === 0 ? (
+                <div className="text-slate-600 italic">Нажмите кнопку «Отправить», чтобы увидеть работу Telegram Webhook...</div>
+              ) : (
+                logs.map((log, idx) => (
+                  <div key={idx} className={log.includes('ERROR') ? 'text-rose-400' : log.includes('COPIED') || log.includes('FORWARD') ? 'text-emerald-400 font-bold' : 'text-slate-300'}>
+                    {log}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
 
-        {/* Output & Simulation Result (Right Column) */}
-        <div className="lg:col-span-7 space-y-4">
-          {/* Telegram Personal Chat Mockup */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-3">
+        {/* Right Column: Dual Telegram Screens (8 cols) */}
+        <div className="lg:col-span-8 grid grid-cols-1 md:grid-cols-2 gap-4">
+          
+          {/* SCREEN 1: CLIENT DM (CLEAN DIALOGUE) */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col h-[520px] shadow-xl">
+            {/* Header */}
+            <div className="pb-3 border-b border-slate-800 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-amber-600 to-orange-500 flex items-center justify-center text-white text-xs font-bold shadow-md">
-                  {interlocutorName.slice(0, 1)}
+                <div className="w-8 h-8 rounded-full bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 font-bold text-xs">
+                  АС
                 </div>
                 <div>
                   <div className="text-xs font-bold text-white flex items-center gap-1.5">
                     <span>{interlocutorName}</span>
-                    <span className="text-[9px] bg-blue-500/20 text-blue-300 px-1.5 py-0.2 rounded font-normal">
+                    <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded font-normal">
                       @{interlocutorHandle}
                     </span>
                   </div>
-                  <div className="text-[10px] text-emerald-400">Секретарь подключен • Stateless Mirror</div>
+                  <div className="text-[10px] text-slate-400">Чат с клиентом (В чужих ЛС)</div>
                 </div>
               </div>
-              <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded text-slate-400 font-mono">
-                Telegram Business
+              <span className="text-[9px] font-semibold bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/20">
+                Чистый диалог
               </span>
             </div>
 
-            {/* Telegram Chat Feed */}
-            <div className="bg-[#0f172a] rounded-2xl p-4 border border-slate-800 text-white text-xs space-y-3 min-h-[300px] max-h-[380px] overflow-y-auto shadow-inner">
-              {chatHistory.map((item) => {
-                if (item.type === 'system') {
+            {/* Chat Messages */}
+            <div className="flex-1 bg-[#0f172a] rounded-xl p-3 my-3 border border-slate-800/80 overflow-y-auto space-y-2.5">
+              <div className="text-center my-1">
+                <span className="bg-slate-900/90 text-slate-400 text-[10px] px-2.5 py-1 rounded-full border border-slate-800">
+                  🔒 Telegram Business подключен • Собеседник видит только вашу беседу
+                </span>
+              </div>
+
+              {clientChatHistory.map((item) => {
+                const isUser = item.sender === 'user';
+                return (
+                  <div key={item.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                    <div
+                      className={`max-w-[85%] rounded-2xl px-3 py-2 text-xs shadow-md ${
+                        isUser
+                          ? 'bg-blue-600 text-white rounded-br-none'
+                          : 'bg-slate-800 border border-slate-700 text-slate-100 rounded-bl-none'
+                      }`}
+                    >
+                      <div className="text-[10px] font-semibold opacity-75 mb-0.5">
+                        {isUser ? 'Вы' : item.senderName}
+                      </div>
+
+                      {item.type === 'photo' && (
+                        <div className="mb-1.5 rounded-lg overflow-hidden border border-white/10 bg-black/20 p-2 text-center text-[10px] text-slate-300 flex items-center justify-center gap-1.5">
+                          <Image className="w-3.5 h-3.5" />
+                          <span>[Изображение / Документ]</span>
+                        </div>
+                      )}
+                      {item.type === 'document' && (
+                        <div className="mb-1.5 rounded-lg border border-white/10 bg-black/20 p-1.5 text-[10px] flex items-center gap-1.5">
+                          <Briefcase className="w-3.5 h-3.5" />
+                          <span>document_presentation.pdf</span>
+                        </div>
+                      )}
+                      {item.type === 'voice' && (
+                        <div className="mb-1.5 rounded-lg border border-white/10 bg-black/20 p-1.5 text-[10px] flex items-center gap-1.5">
+                          <Mic className="w-3.5 h-3.5" />
+                          <span>Голосовое сообщение (0:18)</span>
+                        </div>
+                      )}
+
+                      <div className="text-xs break-words">{item.content}</div>
+                      <div className="text-[9px] text-right opacity-60 mt-1">{item.timestamp}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Input placeholder */}
+            <div className="text-[11px] text-slate-500 text-center shrink-0">
+              В чате клиента бот ничего не пишет и не мешает беседе
+            </div>
+          </div>
+
+          {/* SCREEN 2: SECRETARY BOT DM (WHERE LOGS & COPIES ARRIVE) */}
+          <div className="bg-slate-900 border border-blue-500/40 rounded-2xl p-4 flex flex-col h-[520px] shadow-xl relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/5 rounded-full blur-3xl pointer-events-none" />
+
+            {/* Header */}
+            <div className="pb-3 border-b border-slate-800 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold text-xs shadow-md">
+                  <Bot className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <span>Персональный Секретарь</span>
+                    <span className="text-[9px] bg-blue-500/20 text-blue-300 px-1.5 py-0.2 rounded font-normal">
+                      bot
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-emerald-400">Ваш личный чат с Ботом (ЛС)</div>
+                </div>
+              </div>
+              <span className="text-[9px] font-semibold bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded border border-blue-500/30">
+                Журнал Секретаря
+              </span>
+            </div>
+
+            {/* Bot Chat Messages */}
+            <div className="flex-1 bg-[#0b1324] rounded-xl p-3 my-3 border border-blue-950/80 overflow-y-auto space-y-2.5">
+              {botChatHistory.map((item) => {
+                if (item.type === 'welcome') {
                   return (
-                    <div key={item.id} className="flex justify-center my-2">
-                      <div className="bg-blue-950/80 border border-blue-500/30 text-blue-200 text-[11px] rounded-xl px-3 py-2 text-center max-w-[90%] shadow-md">
+                    <div key={item.id} className="flex justify-center my-1">
+                      <div className="bg-slate-900/90 border border-blue-500/30 rounded-xl p-2.5 text-[11px] text-blue-200 text-center leading-relaxed max-w-[95%]">
                         {item.content}
                       </div>
                     </div>
                   );
                 }
 
-                // Render Metadata Protocol Card
-                if (item.type === 'metadata') {
+                // PROTOCOL CARD
+                if (item.type === 'protocol') {
                   return (
-                    <div key={item.id} className="flex justify-start my-1.5">
-                      <div className="bg-slate-900 border border-emerald-500/30 rounded-xl p-2.5 text-xs shadow-lg max-w-[85%] text-slate-200 font-sans space-y-1">
-                        <div className="flex items-center gap-1.5 text-emerald-400 font-bold text-[11px] pb-1 border-b border-slate-800">
-                          <Tag className="w-3.5 h-3.5" />
-                          <span>📋 [СЕКРЕТАРЬ • ПРОТОКОЛ СООБЩЕНИЯ]</span>
+                    <div key={item.id} className="flex justify-start my-1">
+                      <div className="bg-slate-900 border border-emerald-500/40 rounded-xl p-2.5 text-xs shadow-lg max-w-[95%] text-slate-200 font-sans space-y-1 w-full">
+                        <div className="flex items-center justify-between pb-1 border-b border-slate-800">
+                          <div className="flex items-center gap-1.5 text-emerald-400 font-bold text-[11px]">
+                            <Tag className="w-3.5 h-3.5" />
+                            <span>📋 [ПРОТОКОЛ ПЕРЕХВАТА]</span>
+                          </div>
+                          <span className="text-[9px] text-slate-500">{item.timestamp}</span>
                         </div>
                         <div className="grid grid-cols-1 gap-0.5 text-[11px] pt-0.5">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-slate-400">👤 Отправитель:</span>
-                            <span className="font-semibold text-white">{item.senderName}</span>
+                          <div className="flex items-center gap-1">
+                            <span className="text-slate-400">💬 Диалог:</span>
+                            <span className="font-semibold text-blue-300">{item.chatTitle}</span>
                           </div>
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1">
+                            <span className="text-slate-400">👤 Кто написал:</span>
+                            <span className="font-semibold text-white">{item.authorName}</span>
+                          </div>
+                          <div className="flex items-center gap-1">
                             <span className="text-slate-400">🔖 Никнейм:</span>
-                            <span className="text-blue-300">@{item.senderHandle}</span>
+                            <span className="text-amber-300">@{item.authorHandle}</span>
                           </div>
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1">
                             <span className="text-slate-400">🆔 ID:</span>
-                            <code className="bg-slate-950 px-1.5 py-0.2 rounded text-[10px] text-amber-300 font-mono">
-                              {item.senderId}
+                            <code className="bg-slate-950 px-1 py-0.2 rounded text-[10px] text-slate-300 font-mono">
+                              {item.authorId}
                             </code>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-slate-400">📅 Дата и время:</span>
-                            <span className="text-slate-300">23.08.2026 {item.timestamp}:14 (МСК)</span>
                           </div>
                         </div>
                       </div>
@@ -457,116 +613,55 @@ export const BotSimulator: React.FC = () => {
                   );
                 }
 
-                const isCopy = item.sender === 'bot_copy_interlocutor' || item.sender === 'bot_copy_user';
-                const isUserSide = item.sender === 'user' || item.sender === 'bot_copy_user';
-
-                return (
-                  <div
-                    key={item.id}
-                    className={`flex flex-col ${isUserSide ? 'items-end' : 'items-start'}`}
-                  >
-                    <div
-                      className={`max-w-[85%] rounded-2xl p-3 text-xs shadow-md ${
-                        isUserSide
-                          ? isCopy
-                            ? 'bg-slate-800/90 text-blue-100 border border-blue-500/40 rounded-br-none'
-                            : 'bg-blue-600 text-white rounded-br-none'
-                          : isCopy
-                          ? 'bg-slate-800 text-slate-100 border border-amber-500/40 rounded-bl-none'
-                          : 'bg-slate-700/80 text-slate-100 rounded-bl-none'
-                      }`}
-                    >
-                      {/* Sub-header for mirrored message */}
-                      {isCopy && (
-                        <div className="flex items-center gap-1 text-[10px] font-semibold mb-1 text-emerald-400">
-                          <Copy className="w-3 h-3" />
-                          <span>
-                            Копия секретаря (
-                            {item.sender === 'bot_copy_interlocutor' ? 'Собеседник' : 'Пользователь'}
-                            )
-                          </span>
+                // NATIVE COPY OF MESSAGE
+                if (item.type === 'copy') {
+                  return (
+                    <div key={item.id} className="flex justify-start pl-2">
+                      <div className="bg-slate-800/90 border border-blue-500/20 text-slate-100 rounded-xl rounded-tl-none px-3 py-2 text-xs shadow max-w-[90%]">
+                        <div className="text-[10px] text-blue-400 font-medium mb-0.5 flex items-center gap-1">
+                          <Bot className="w-3 h-3" />
+                          <span>Копия сообщения ({item.authorName}):</span>
                         </div>
-                      )}
 
-                      {!isCopy && (
-                        <div className="text-[10px] font-semibold text-slate-300/80 mb-0.5">
-                          {item.senderName}
-                        </div>
-                      )}
-
-                      {item.type === 'text' && (
-                        <p className="whitespace-pre-wrap leading-relaxed">{item.content}</p>
-                      )}
-
-                      {item.type === 'photo' && (
-                        <div className="space-y-1.5">
-                          <div className="h-28 bg-slate-900/80 rounded-lg flex items-center justify-center border border-slate-700 text-slate-400 text-[11px] gap-2">
-                            <Image className="w-5 h-5 text-blue-400" />
-                            <span>[Фотография]</span>
+                        {item.msgType === 'photo' && (
+                          <div className="mb-1 rounded bg-black/30 p-1.5 text-[10px] flex items-center gap-1 text-slate-300">
+                            <Image className="w-3.5 h-3.5" />
+                            <span>[Оригинальное фото]</span>
                           </div>
-                          {item.caption && <p className="text-[11px] leading-tight">{item.caption}</p>}
-                        </div>
-                      )}
-
-                      {item.type === 'document' && (
-                        <div className="flex items-center gap-2.5 bg-slate-900/60 p-2 rounded-lg border border-slate-700/50">
-                          <FileText className="w-5 h-5 text-blue-400 shrink-0" />
-                          <div className="overflow-hidden">
-                            <div className="font-semibold truncate text-[11px]">{item.content || 'Документ.pdf'}</div>
-                            <div className="text-[9px] text-slate-400">1.4 MB • Документ</div>
+                        )}
+                        {item.msgType === 'document' && (
+                          <div className="mb-1 rounded bg-black/30 p-1.5 text-[10px] flex items-center gap-1 text-slate-300">
+                            <Briefcase className="w-3.5 h-3.5" />
+                            <span>document_presentation.pdf</span>
                           </div>
-                        </div>
-                      )}
-
-                      {item.type === 'voice' && (
-                        <div className="flex items-center gap-2 bg-slate-900/60 p-2 rounded-lg border border-slate-700/50 min-w-[180px]">
-                          <Mic className="w-4 h-4 text-emerald-400 shrink-0" />
-                          <div className="flex-1">
-                            <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                              <div className="w-2/3 h-full bg-emerald-400 rounded-full"></div>
-                            </div>
-                            <div className="text-[9px] text-slate-400 mt-1">Голосовое сообщение (0:14)</div>
+                        )}
+                        {item.msgType === 'voice' && (
+                          <div className="mb-1 rounded bg-black/30 p-1.5 text-[10px] flex items-center gap-1 text-slate-300">
+                            <Mic className="w-3.5 h-3.5" />
+                            <span>Голосовое сообщение (0:18)</span>
                           </div>
-                        </div>
-                      )}
+                        )}
 
-                      <div
-                        className={`text-[9px] mt-1.5 text-right ${
-                          isUserSide ? 'text-blue-200' : 'text-slate-400'
-                        }`}
-                      >
-                        {item.timestamp}
+                        <div className="text-xs break-words">{item.content}</div>
+                        <div className="text-[9px] text-right text-slate-400 mt-1">{item.timestamp}</div>
                       </div>
                     </div>
-                  </div>
-                );
+                  );
+                }
+
+                return null;
               })}
             </div>
-          </div>
 
-          {/* Execution & Telemetry Log */}
-          <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 shadow-xl">
-            <div className="flex items-center justify-between text-xs text-slate-400 mb-2 font-mono">
-              <span className="flex items-center gap-1.5 text-slate-300">
-                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-                Telegram Business Secretary Telemetry (Stateless)
-              </span>
-              <span>Node.js v20.x</span>
-            </div>
-
-            <div className="bg-black rounded-xl p-3 font-mono text-[11px] text-slate-300 space-y-1.5 max-h-36 overflow-y-auto">
-              {logs.length > 0 ? (
-                logs.map((l, i) => (
-                  <div key={i} className="leading-tight">
-                    {l}
-                  </div>
-                ))
-              ) : (
-                <div className="text-slate-600 italic">Ожидание сообщений в чужих ЛС или прямом чате...</div>
-              )}
+            {/* Status footer */}
+            <div className="text-[11px] text-emerald-400 font-medium text-center shrink-0 flex items-center justify-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Секретарь архивирует все сообщения в ваш личный чат</span>
             </div>
           </div>
+
         </div>
+
       </div>
     </div>
   );
