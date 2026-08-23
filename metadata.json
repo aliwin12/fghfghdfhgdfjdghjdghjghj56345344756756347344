@@ -1,6 +1,6 @@
 {
-  "name": "Serverless Telegram Bot Architect & Deployer",
-  "description": "Multi-user Telegram Bot Serverless architecture, deployer, and webhook orchestrator with Telegraf",
+  "name": "Personal Secretary Telegram Bot (Stateless DM Mirror)",
+  "description": "Персональный секретарь для личных сообщений: моментальное копирование любых сообщений пользователя без сохранения в памяти",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

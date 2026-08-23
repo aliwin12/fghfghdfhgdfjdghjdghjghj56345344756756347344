@@ -1,21 +1,21 @@
 import { CodeFile } from '../types';
 
 export const BOT_TOKEN = '8988916261:AAFjUcZnQuDLbXh32A6zUUI64bCPj7KnW6w';
-export const DEFAULT_APP_DOMAIN = 'universal-logger-bot.app';
+export const DEFAULT_APP_DOMAIN = 'secretary-bot.app';
 
 export const BOT_FILES: CodeFile[] = [
   {
     name: 'api/bot.js',
     path: 'api/bot.js',
     language: 'javascript',
-    description: 'Главная Serverless-функция. Обрабатывает Webhook, определяет админов групп "на лету" и рассылает логи.',
+    description: 'Главная Serverless-функция персонального секретаря. Работает только в личных сообщениях, моментально копирует любые входящие сообщения и сразу завершает выполнение без сохранения данных.',
     content: `// api/bot.js
-// Универсальный Serverless Telegram-бот для платформы Vercel
-// Работает без внешней базы данных (Stateless) на библиотеке Telegraf
+// Персональный секретарь для личных сообщений (Stateless Message Mirror)
+// Работает на библиотеке Telegraf без сохранения истории (Zero Data Retention)
 
 const { Telegraf } = require('telegraf');
 
-// 1. Инициализация вне хендлера (Global Scope) для устранения оверхеда при повторных вызовах (Warm Invocations)
+// 1. Инициализация экземпляра бота вне хендлера (Global Scope) для минимизации задержек
 const BOT_TOKEN = process.env.BOT_TOKEN || '${BOT_TOKEN}';
 
 if (!BOT_TOKEN) {
@@ -24,173 +24,99 @@ if (!BOT_TOKEN) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// Кэш администраторов в оперативной памяти лямбды (снижает нагрузку на Telegram API внутри одной «прогретой» инстанции)
-const adminCache = new Map();
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 минут
-
-/**
- * Получение списка ID администраторов-людей для конкретного чата
- */
-async function getHumanAdmins(chatId) {
-  const cached = adminCache.get(chatId);
-  const now = Date.now();
-
-  if (cached && (now - cached.timestamp < CACHE_TTL_MS)) {
-    return cached.adminIds;
-  }
-
-  try {
-    const admins = await bot.telegram.getChatAdministrators(chatId);
-    // Фильтруем только реальных пользователей (исключаем ботов)
-    const humanAdminIds = admins
-      .filter((admin) => !admin.user.is_bot)
-      .map((admin) => admin.user.id);
-
-    adminCache.set(chatId, {
-      adminIds: humanAdminIds,
-      timestamp: now,
-    });
-
-    return humanAdminIds;
-  } catch (error) {
-    console.error(\`[ADMIN_RESOLVER_ERROR] Чат \${chatId}: \${error.message}\`);
-    return [];
-  }
-}
-
-/**
- * Форматирование читаемого лога события группы
- */
-function formatGroupLog(ctx) {
-  const chat = ctx.chat;
-  const from = ctx.from || {};
-  const msg = ctx.message || ctx.channelPost || ctx.editedMessage || {};
-
-  const chatTitle = chat.title || 'Безымянная группа';
-  const chatUsername = chat.username ? \`@\${chat.username}\` : \`ID: \${chat.id}\`;
-  const senderName = [from.first_name, from.last_name].filter(Boolean).join(' ') || 'Аноним';
-  const senderUsername = from.username ? \`@\${from.username}\` : \`ID: \${from.id || 'N/A'}\`;
-
-  let eventType = '💬 Сообщение';
-  let content = msg.text || '';
-
-  if (msg.photo) {
-    eventType = '📸 Фотография';
-    content = msg.caption ? \`[Подпись]: \${msg.caption}\` : '[Без подписи]';
-  } else if (msg.document) {
-    eventType = '📁 Документ/Файл';
-    content = \`\${msg.document.file_name || 'файл'} (\${(msg.document.file_size / 1024).toFixed(1)} KB)\`;
-  } else if (msg.voice) {
-    eventType = '🎤 Голосовое сообщение';
-    content = \`Длительность: \${msg.voice.duration} сек.\`;
-  } else if (msg.video) {
-    eventType = '🎥 Видеозапись';
-    content = msg.caption || '[Видео]';
-  } else if (msg.sticker) {
-    eventType = '🎭 Стикер';
-    content = \`Эмодзи: \${msg.sticker.emoji || '—'}\`;
-  } else if (msg.new_chat_members) {
-    eventType = '👋 Новый участник';
-    content = msg.new_chat_members.map(m => m.first_name).join(', ');
-  } else if (msg.left_chat_member) {
-    eventType = '🚪 Вышел из группы';
-    content = msg.left_chat_member.first_name;
-  }
-
-  const timeStr = new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
-
-  return (
-    \`🔔 <b>[ЛОГ ГРУППЫ]</b> <i>(\${timeStr} МСК)</i>\\n\\n\` +
-    \`👥 <b>Группа:</b> \${chatTitle} (\${chatUsername})\\n\` +
-    \`👤 <b>Отправитель:</b> \${senderName} (\${senderUsername})\\n\` +
-    \`📌 <b>Тип:</b> \${eventType}\\n\` +
-    \`📝 <b>Содержимое:</b>\\n<code>\${content.slice(0, 1500)}</code>\`
-  );
-}
-
-// 2. Обработка команд в личных сообщениях
+// 2. Команды управления персональным секретарём в личных сообщениях
 bot.start(async (ctx) => {
-  if (ctx.chat.type === 'private') {
-    return ctx.replyWithHTML(
-      \`👋 <b>Привет, \${ctx.from.first_name || 'пользователь'}!</b>\\n\\n\` +
-      \`Я — <b>Универсальный бот-логгер</b>, работающий на бессерверной архитектуре Vercel Serverless.\\n\\n\` +
-      \`🔹 <b>Как мной пользоваться:</b>\\n\` +
-      \`1. Добавь меня в свою группу или супергруппу.\\n\` +
-      \`2. Назначь меня <b>Администратором</b> (достаточно прав на чтение сообщений).\\n\` +
-      \`3. Как только в группе кто-то напишет, я <b>автоматически определю тебя как администратора</b> и пришлю лог сюда в ЛС!\\n\\n\` +
-      \`⚡ <i>Работаю мгновенно, без задержек и без базы данных!</i>\`
-    );
-  }
-});
-
-bot.command('status', (ctx) => {
-  ctx.replyWithHTML(
-    \`🚀 <b>Статус:</b> Бот онлайн на Vercel Serverless!\\n\` +
-    \`⏱ <b>Uptime:</b> \${process.uptime().toFixed(1)} сек.\\n\` +
-    \`📦 <b>Node.js:</b> \${process.version}\`
-  );
-});
-
-// 3. Главный перехватчик сообщений из групп и каналов
-bot.on(['message', 'edited_message', 'channel_post'], async (ctx) => {
-  const chat = ctx.chat;
-
-  // Игнорируем обычные ЛС (чтобы не зацикливать логи)
-  if (chat.type === 'private') {
+  // Работаем строго только в личных сообщениях
+  if (ctx.chat.type !== 'private') {
     return;
   }
 
-  console.log(\`[GROUP_EVENT] Получено событие из группы "\${chat.title}" (ID: \${chat.id})\`);
-
-  try {
-    // Получаем всех админов группы через Telegram API "на лету"
-    const adminIds = await getHumanAdmins(chat.id);
-
-    if (!adminIds || adminIds.length === 0) {
-      console.warn(\`[NO_ADMINS] Не удалось найти администраторов для чата \${chat.id}\`);
-      return;
-    }
-
-    const logMessage = formatGroupLog(ctx);
-
-    // Параллельная рассылка лога всем администраторам чата
-    const sendPromises = adminIds.map(async (adminId) => {
-      try {
-        await bot.telegram.sendMessage(adminId, logMessage, { parse_mode: 'HTML' });
-        console.log(\`[LOG_SENT] Лог успешно отправлен админу ID: \${adminId}\`);
-      } catch (sendErr) {
-        // Ошибка 403 возникает, если админ не запустил бота в ЛС (/start)
-        if (sendErr.response && sendErr.response.error_code === 403) {
-          console.warn(\`[FORBIDDEN] Админ \${adminId} не запустил бота в ЛС (/start)\`);
-        } else {
-          console.error(\`[SEND_ERROR] Сбой отправки админу \${adminId}: \${sendErr.message}\`);
-        }
-      }
-    });
-
-    await Promise.allSettled(sendPromises);
-  } catch (err) {
-    console.error(\`[PROCESS_ERROR] Ошибка обработки сообщения: \${err.message}\`);
-  }
+  return ctx.replyWithHTML(
+    \`💼 <b>Привет, \${ctx.from.first_name || 'пользователь'}!</b>\\n\\n\` +
+    \`Я — ваш <b>Персональный Секретарь</b> для личных сообщений.\\n\\n\` +
+    \`📌 <b>Как я работаю:</b>\\n\` +
+    \`• Отправьте мне любой текст, заметку, фото, документ, голосовое сообщение или медиафайл.\\n\` +
+    \`• Я <b>моментально создам точную копию</b> вашего сообщения в этом чате.\\n\` +
+    \`• Копия останется в вашей ленте чата, а сам я <b>моментально забуду</b> о ней (Stateless / 0% сохранения данных на сервере).\\n\\n\` +
+    \`🔒 <i>Полная конфиденциальность: сообщения не логируются и не сохраняются в базе данных.</i>\`
+  );
 });
 
-// 4. Экспорт Vercel Serverless Function Handler
+bot.help(async (ctx) => {
+  if (ctx.chat.type !== 'private') return;
+
+  return ctx.replyWithHTML(
+    \`ℹ️ <b>Справка Персонального Секретаря:</b>\\n\\n\` +
+    \`1. Отправьте любое входящее сообщение: текст, фото, видео, кружочек, аудио, файл или стикер.\\n\` +
+    \`2. Бот выполнит нативное дублирование (<code>copyMessage</code>).\\n\` +
+    \`3. Созданная копия останется в диалоге Telegram навсегда.\\n\` +
+    \`4. Сам бот не хранит базы данных и сразу освобождает память.\\n\\n\` +
+    \`⚙️ Команды: /start, /help, /status\`
+  );
+});
+
+bot.command('status', async (ctx) => {
+  if (ctx.chat.type !== 'private') return;
+
+  return ctx.replyWithHTML(
+    \`⚡ <b>Статус Секретаря:</b> Активен (Онлайн)\\n\` +
+    \`🛡 <b>Режим:</b> Личные сообщения (Private DM Only)\\n\` +
+    \`🧠 <b>Память (State):</b> 0 KB (Stateless / Zero-Retention)\\n\` +
+    \`⏱ <b>Uptime экземпляра:</b> \${process.uptime().toFixed(1)} сек.\\n\` +
+    \`📦 <b>Среда:</b> Node.js \${process.version}\`
+  );
+});
+
+// 3. Главный обработчик личных сообщений: Моментальное копирование без сохранения
+bot.on('message', async (ctx) => {
+  const chat = ctx.chat;
+  const message = ctx.message;
+
+  // Игнорируем групповые чаты и каналы — бот работает ТОЛЬКО как секретарь в личных сообщениях
+  if (chat.type !== 'private') {
+    console.log(\`[IGNORED_GROUP] Сообщение из группы ID \${chat.id} проигнорировано (Секретарь работает только в ЛС)\`);
+    return;
+  }
+
+  // Игнорируем системные команды, чтобы не дублировать /start или /status повторно
+  if (message.text && message.text.startsWith('/')) {
+    return;
+  }
+
+  const userId = ctx.from.id;
+  const messageId = message.message_id;
+  const startTime = Date.now();
+
+  console.log(\`[SECRETARY_RECV] Получено личное сообщение msg_id: \${messageId} от пользователя \${userId}\`);
+
+  try {
+    // Выполняем точное нативное копирование сообщения в тот же чат
+    // Метод copyMessage сохраняет все типы медиа, форматирование текста, подписи и стикеры
+    await ctx.telegram.copyMessage(chat.id, chat.id, messageId);
+
+    const elapsed = Date.now() - startTime;
+    console.log(\`[SECRETARY_COPIED] Сообщение \${messageId} продублировано в чат за \${elapsed}ms. Память очищена (Stateless).\`);
+  } catch (err) {
+    console.error(\`[SECRETARY_ERROR] Не удалось скопировать сообщение \${messageId}: \${err.message}\`);
+  }
+  // Переменные message и контекст уничтожаются при завершении функции — бот моментально забывает сообщение
+});
+
+// 4. Экспорт бессерверного обработчика Webhook (Serverless Handler)
 module.exports = async (req, res) => {
-  // Проверка метода (Telegram Webhook всегда отправляет POST)
+  // Telegram Webhook отправляет обновления строго методом POST
   if (req.method !== 'POST') {
-    return res.status(200).send('Telegram Webhook Bot is Running on Vercel!');
+    return res.status(200).send('Personal Secretary Telegram Bot is Running (Stateless)!');
   }
 
   try {
-    // Передаем тело вебхука в Telegraf для обработки
     if (req.body && typeof req.body === 'object') {
       await bot.handleUpdate(req.body);
     }
   } catch (err) {
     console.error('[WEBHOOK_HANDLE_ERROR]', err);
   } finally {
-    // КРИТИЧЕСКИ ВАЖНО: Всегда возвращаем HTTP 200 OK Telegram серверу
-    // Это предотвращает повторные отправки (Retry Storm) и сразу завершает функцию в Vercel
+    // Всегда возвращаем HTTP 200 OK Telegram серверу для подтверждения
     res.status(200).end();
   }
 };
@@ -245,24 +171,23 @@ module.exports = async (req, res) => {
     name: 'package.json',
     path: 'package.json',
     language: 'json',
-    description: 'Зависимости проекта. Содержит библиотеку Telegraf для бессерверного режима.',
+    description: 'Зависимости проекта: библиотека Telegraf для бессерверной обработки входящих запросов.',
     content: `{
-  "name": "universal-telegram-logger-bot",
+  "name": "telegram-personal-secretary-bot",
   "version": "1.0.0",
-  "description": "Multi-user Serverless Telegram Logger Bot for Vercel",
+  "description": "Stateless Personal Secretary Telegram Bot (DM Mirror & Zero Memory)",
   "main": "api/bot.js",
   "scripts": {
-    "start": "node api/bot.js",
-    "dev": "vercel dev"
+    "start": "node api/bot.js"
   },
   "keywords": [
     "telegram",
     "bot",
+    "secretary",
     "telegraf",
-    "vercel",
     "serverless",
-    "multi-user",
-    "logger"
+    "stateless",
+    "copy-message"
   ],
   "author": "",
   "license": "MIT",
@@ -295,12 +220,12 @@ BOT_TOKEN=8988916261:AAFjUcZnQuDLbXh32A6zUUI64bCPj7KnW6w
     content: `# Зависимости
 node_modules/
 
-# Локальные переменные окружения (НЕ КОММИТИТЬ В ПУБЛИЧНЫЕ РЕПО!)
+# Локальные переменные окружения
 .env
 .env.local
 .env.*.local
 
-# Системные папки Vercel
+# Системные папки
 .vercel
 
 # Логи и временные файлы
@@ -314,22 +239,14 @@ yarn-error.log*
     name: 'README.md',
     path: 'README.md',
     language: 'markdown',
-    description: 'Документация и инструкция по запуску бота.',
-    content: `# 🤖 Universal Multi-User Telegram Logger Bot on Vercel
+    description: 'Документация и описание работы персонального секретаря.',
+    content: `# 💼 Telegram Personal Secretary Bot (Stateless DM Mirror)
 
-Универсальный многопользовательский бот-логгер сообщений для Telegram-групп, развернутый на **Vercel Serverless Functions**.
-
-## 🚀 Быстрый старт:
-
-1. **GitHub:** Склонируйте или создайте репозиторий со структурой:
-   - \`api/bot.js\`
-   - \`vercel.json\`
-   - \`package.json\`
-2. **Vercel:** Импортируйте репозиторий в [Vercel Dashboard](https://vercel.com/new).
-3. **Env Variables:** Добавьте \`BOT_TOKEN\` = \`8988916261:AAFjUcZnQuDLbXh32A6zUUI64bCPj7KnW6w\`.
-4. **Webhook:** Откройте в браузере:
-   \`https://api.telegram.org/bot8988916261:AAFjUcZnQuDLbXh32A6zUUI64bCPj7KnW6w/setWebhook?url=https://YOUR_DOMAIN.vercel.app/api/bot\`
-5. **BotFather:** Отключите Group Privacy в @BotFather: \`/setprivacy\` -> \`Disable\`.
+Персональный Telegram-бот секретарь для личных сообщений:
+- ✉️ **Только личные сообщения (Private DM)** — игнорирует группы и каналы.
+- 📋 **Мгновенное копирование** — дублирует любое сообщение (текст, фото, видео, кружочки, аудио, файлы, стикеры) через \`copyMessage\`.
+- 🧠 **Stateless (Zero Retention)** — моментально забывает данные сразу после отправки, не сохраняя их в базе данных.
+- 💾 **Сохранение в чате** — все копии навсегда остаются в ленте диалога пользователя.
 `,
   },
 ];

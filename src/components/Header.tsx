@@ -19,14 +19,14 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, setActiveTab }) => {
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-xl font-bold tracking-tight text-white">
-                  Serverless Telegram Bot
+                  Personal Secretary Telegram Bot
                 </h1>
                 <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  <Zap className="w-3 h-3 mr-1" /> Multi-User Stateless
+                  <Zap className="w-3 h-3 mr-1" /> Stateless DM Mirror
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Архитектура • Telegraf Node.js • Webhook Engine
+                Секретарь для личных сообщений • Копирование сообщений • Zero Data Retention
               </p>
             </div>
           </div>
