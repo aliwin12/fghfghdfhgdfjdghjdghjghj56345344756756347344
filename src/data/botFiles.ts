@@ -14,12 +14,12 @@ export const BOT_FILES: BotFile[] = [
     name: 'bot.js',
     path: 'api/bot.js',
     language: 'javascript',
-    description: 'Главная Serverless Function Vercel (Webhook) с защитой от слётов сессий (Zero-Drop Engine). Авто-восстанавливает связь через Telegram API 7.2+, сохраняет состояние в data/secretary-state.json, фильтрует по /mode и позволяет делиться с коллегами (/share, /team).',
+    description: 'Главная Serverless Function Vercel (Webhook) со 100% изоляцией пользователей (Multi-Tenant) и защитой от слётов сессий (Zero-Drop Engine). Авто-восстанавливает связь через Telegram API 7.2+, сохраняет изолированное состояние в data/secretary-state.json, фильтрует по /mode и позволяет делиться с коллегами (/share, /team).',
     content: `// api/bot.js
 // Персональный секретарь для личных сообщений и чужих ЛС (Telegram Business + Stateless Mirror)
-// Архитектура: Zero-Retention / Без сохранения состояния (Stateless) + Persistent Anti-Drop Engine
+// Архитектура: Zero-Retention / Без сохранения состояния (Stateless) + Multi-Tenant Persistent Anti-Drop Engine
 // Логика: перехват входящих/исходящих сообщений в бизнес-чатах и отправка протокола с копией в ЛС владельца с ботом!
-// Поддержка: индивидуальная доставка подключившему владельцу, фильтрация (/mode) и шеринг (/share, /team)
+// Поддержка: строгая изоляция пользователей, фильтрация (/mode) и шеринг (/share, /team)
 // Формат: ES Module (совместим с Vercel Serverless Functions & Node.js 18+)
 
 import { Telegraf } from 'telegraf';
@@ -41,9 +41,10 @@ bot.catch((err) => {
 });
 
 // Кэш сопоставления подключений к ID владельца и список зарегистрированных пользователей
+// СТРОГАЯ ИЗОЛЯЦИЯ ПОЛЬЗОВАТЕЛЕЙ (Multi-Tenant Isolation):
 const connectionToOwner = new Map();
 const registeredOwners = new Set();
-let lastKnownOwnerId = null;
+const ownerConnections = new Map();
 
 // Режимы фильтрации: 'all' (все сообщения), 'my_only' (только исходящие владельца), 'clients_only' (только входящие от клиентов)
 const ownerFilterMode = new Map();
@@ -51,7 +52,7 @@ const ownerFilterMode = new Map();
 // Список доверенных получателей (делегатов) владельца: Map<ownerId, Set<delegateId>>
 const ownerDelegates = new Map();
 
-// --- PERSISTENT STATE STORAGE (Zero-Drop Engine) ---
+// --- PERSISTENT STATE STORAGE (Multi-Tenant Zero-Drop Engine) ---
 const STATE_DIR = path.join(process.cwd(), 'data');
 const STATE_FILE_PATH = path.join(STATE_DIR, 'secretary-state.json');
 const FALLBACK_STATE_PATH = path.join('/tmp', 'secretary-state.json');
@@ -65,12 +66,17 @@ function loadPersistentState() {
     if (fs.existsSync(filePath)) {
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       if (data.connections) {
-        Object.entries(data.connections).forEach(([c, o]) => connectionToOwner.set(c, o));
+        Object.entries(data.connections).forEach(([connId, ownerId]) => {
+          connectionToOwner.set(connId, ownerId);
+          if (!ownerConnections.has(ownerId)) {
+            ownerConnections.set(ownerId, new Set());
+          }
+          ownerConnections.get(ownerId).add(connId);
+        });
       }
       if (Array.isArray(data.registeredOwners)) {
         data.registeredOwners.forEach((id) => registeredOwners.add(id));
       }
-      if (data.lastKnownOwnerId) lastKnownOwnerId = data.lastKnownOwnerId;
       if (data.ownerFilterMode) {
         Object.entries(data.ownerFilterMode).forEach(([id, m]) => ownerFilterMode.set(parseInt(id, 10), m));
       }
@@ -89,7 +95,9 @@ function savePersistentState() {
     const state = {
       connections: Object.fromEntries(connectionToOwner.entries()),
       registeredOwners: Array.from(registeredOwners),
-      lastKnownOwnerId,
+      ownerConnections: Object.fromEntries(
+        Array.from(ownerConnections.entries()).map(([k, v]) => [k, Array.from(v)])
+      ),
       ownerFilterMode: Object.fromEntries(ownerFilterMode.entries()),
       ownerDelegates: Object.fromEntries(Array.from(ownerDelegates.entries()).map(([k, v]) => [k, Array.from(v)])),
       lastUpdated: new Date().toISOString(),
@@ -106,19 +114,23 @@ function savePersistentState() {
 
 loadPersistentState();
 
-// Динамическое API-восстановление владельца (защита от потери сессии)
+// Динамическое API-восстановление владельца со 100% изоляцией
 async function resolveOwnerId(telegram, businessConnectionId) {
-  if (businessConnectionId && connectionToOwner.has(businessConnectionId)) {
+  if (!businessConnectionId) return null;
+  if (connectionToOwner.has(businessConnectionId)) {
     return connectionToOwner.get(businessConnectionId);
   }
-  if (businessConnectionId && telegram?.getBusinessConnection) {
+  if (telegram?.getBusinessConnection) {
     try {
       const connInfo = await telegram.getBusinessConnection(businessConnectionId);
       if (connInfo?.user?.id) {
         const ownerId = connInfo.user.id;
         connectionToOwner.set(businessConnectionId, ownerId);
         registeredOwners.add(ownerId);
-        lastKnownOwnerId = ownerId;
+        if (!ownerConnections.has(ownerId)) {
+          ownerConnections.set(ownerId, new Set());
+        }
+        ownerConnections.get(ownerId).add(businessConnectionId);
         savePersistentState();
         return ownerId;
       }
@@ -126,7 +138,7 @@ async function resolveOwnerId(telegram, businessConnectionId) {
       console.warn('[DYNAMIC_RECOVERY_WARN]', e?.message || e);
     }
   }
-  return lastKnownOwnerId || (registeredOwners.size > 0 ? Array.from(registeredOwners)[0] : null);
+  return null;
 }
 
 // Вспомогательная функция экранирования HTML
