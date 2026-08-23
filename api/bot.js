@@ -128,16 +128,52 @@ function savePersistentState() {
 // Initial state load
 loadPersistentState();
 
-// Dynamic Owner Resolution (Strictly per business_connection_id — ZERO cross-user leakage)
-async function resolveOwnerId(telegram, businessConnectionId) {
-  if (!businessConnectionId) return null;
+// Helper to escape HTML characters safely
+function escapeHtml(text) {
+  if (text === null || text === undefined) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
-  if (connectionToOwner.has(businessConnectionId)) {
+// Dynamic Owner Resolution (Smart Multi-Strategy Engine)
+async function resolveOwnerId(telegram, businessConnectionId, sender = null, fromChat = null) {
+  // Strategy 1: Direct map lookup
+  if (businessConnectionId && connectionToOwner.has(businessConnectionId)) {
     return connectionToOwner.get(businessConnectionId);
   }
 
-  // 1. Dynamic API Query directly to Telegram Bot API
-  if (telegram?.getBusinessConnection) {
+  // Strategy 2: If sender is a registered owner (owner sent message in client chat)
+  if (sender?.id && registeredOwners.has(sender.id)) {
+    if (businessConnectionId) {
+      connectionToOwner.set(businessConnectionId, sender.id);
+      if (!ownerConnections.has(sender.id)) {
+        ownerConnections.set(sender.id, new Set());
+      }
+      ownerConnections.get(sender.id).add(businessConnectionId);
+      savePersistentState();
+      console.log(`[AUTO_RESOLVED_FROM_SENDER] Bound connection ${businessConnectionId} to owner ${sender.id}`);
+    }
+    return sender.id;
+  }
+
+  // Strategy 3: If chat ID matches a registered owner
+  if (fromChat?.id && registeredOwners.has(fromChat.id)) {
+    if (businessConnectionId) {
+      connectionToOwner.set(businessConnectionId, fromChat.id);
+      if (!ownerConnections.has(fromChat.id)) {
+        ownerConnections.set(fromChat.id, new Set());
+      }
+      ownerConnections.get(fromChat.id).add(businessConnectionId);
+      savePersistentState();
+    }
+    return fromChat.id;
+  }
+
+  // Strategy 4: Query Telegram Bot API getBusinessConnection
+  if (businessConnectionId && telegram?.getBusinessConnection) {
     try {
       console.log(`[DYNAMIC_RECOVERY_ATTEMPT] Fetching business connection ${businessConnectionId} from Telegram API...`);
       const connInfo = await telegram.getBusinessConnection(businessConnectionId);
@@ -158,32 +194,37 @@ async function resolveOwnerId(telegram, businessConnectionId) {
     }
   }
 
-  // STRICT PRIVACY PROTECTION: Never fall back to another random user!
-  console.warn(`[UNRESOLVED_CONNECTION_ISOLATION] Connection ${businessConnectionId} cannot be mapped. Message dropped to preserve isolation.`);
+  // Strategy 5: Single-owner default fallback (if only 1 user ever registered in the system)
+  if (registeredOwners.size === 1) {
+    const singleOwner = Array.from(registeredOwners)[0];
+    if (businessConnectionId) {
+      connectionToOwner.set(businessConnectionId, singleOwner);
+      if (!ownerConnections.has(singleOwner)) {
+        ownerConnections.set(singleOwner, new Set());
+      }
+      ownerConnections.get(singleOwner).add(businessConnectionId);
+      savePersistentState();
+    }
+    return singleOwner;
+  }
+
+  console.warn(`[UNRESOLVED_CONNECTION] Connection ${businessConnectionId} could not be resolved automatically.`);
   return null;
 }
 
-// Вспомогательная функция экранирования HTML
-function escapeHtml(text) {
-  if (!text) return '';
-  return String(text)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-// Вспомогательная функция формирования заголовка протокола сообщения
-function formatMetadataHeader(from, dateUnix, chatInfo = null, isEdited = false) {
+// Helper to format metadata header with safe escaping
+function formatMetadataHeader(from, dateUnix = null, chatInfo = null, isEdited = false) {
   const date = dateUnix ? new Date(dateUnix * 1000) : new Date();
   const timeStr = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Europe/Moscow' });
   const dateStr = date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Moscow' });
   
-  const fullName = [from?.first_name, from?.last_name].filter(Boolean).join(' ') || 'Аноним';
-  const username = from?.username ? `@${from.username}` : 'нет никнейма';
+  const rawFullName = [from?.first_name, from?.last_name].filter(Boolean).join(' ') || 'Аноним';
+  const fullName = escapeHtml(rawFullName);
+  const username = from?.username ? `@${escapeHtml(from.username)}` : 'нет никнейма';
   const userId = from?.id || '—';
 
-  const chatTitle = chatInfo ? (chatInfo.title || [chatInfo.first_name, chatInfo.last_name].filter(Boolean).join(' ') || chatInfo.username || `Чат ${chatInfo.id}`) : null;
+  const rawChatTitle = chatInfo ? (chatInfo.title || [chatInfo.first_name, chatInfo.last_name].filter(Boolean).join(' ') || chatInfo.username || `Чат ${chatInfo.id}`) : null;
+  const chatTitle = rawChatTitle ? escapeHtml(rawChatTitle) : null;
 
   return (
     `${isEdited ? '✏️' : '📋'} <b>[СЕКРЕТАРЬ • ${isEdited ? 'ИЗМЕНЕНО СООБЩЕНИЕ' : 'ПРОТОКОЛ ПЕРЕХВАТА'}]</b>\n` +
@@ -194,12 +235,32 @@ function formatMetadataHeader(from, dateUnix, chatInfo = null, isEdited = false)
   );
 }
 
+// Plaintext version of header for emergency fallback
+function formatPlainMetadataHeader(from, dateUnix = null, chatInfo = null, isEdited = false) {
+  const date = dateUnix ? new Date(dateUnix * 1000) : new Date();
+  const timeStr = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Europe/Moscow' });
+  const dateStr = date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Moscow' });
+  const fullName = [from?.first_name, from?.last_name].filter(Boolean).join(' ') || 'Аноним';
+  const username = from?.username ? `@${from.username}` : 'нет никнейма';
+  const userId = from?.id || '—';
+  const chatTitle = chatInfo ? (chatInfo.title || [chatInfo.first_name, chatInfo.last_name].filter(Boolean).join(' ') || chatInfo.username || `Чат ${chatInfo.id}`) : '';
+
+  return (
+    `[СЕКРЕТАРЬ • ${isEdited ? 'ИЗМЕНЕНО СООБЩЕНИЕ' : 'ПРОТОКОЛ ПЕРЕХВАТА'}]\n` +
+    (chatTitle ? `Диалог: ${chatTitle}\n` : '') +
+    `Кто написал: ${fullName} (${username})\n` +
+    `ID автора: ${userId}\n` +
+    `Когда: ${dateStr} в ${timeStr} (МСК)`
+  );
+}
+
 // Клавиатура шеринга под сообщением
 function getShareKeyboard(previewText = 'Секретарь') {
+  const cleanPreview = String(previewText).replace(/[\r\n]+/g, ' ').slice(0, 40);
   return {
     inline_keyboard: [
       [
-        { text: '📤 Поделиться в Telegram', switch_inline_query: previewText.slice(0, 40) },
+        { text: '📤 Поделиться в Telegram', switch_inline_query: cleanPreview },
         { text: '👥 Переслать коллегам', callback_data: 'share_to_delegates' },
       ],
       [
@@ -232,6 +293,7 @@ async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited =
   }
 
   const header = formatMetadataHeader(sender, isEdited ? (bMsg.edit_date || bMsg.date) : bMsg.date, fromChat, isEdited);
+  const plainHeader = formatPlainMetadataHeader(sender, isEdited ? (bMsg.edit_date || bMsg.date) : bMsg.date, fromChat, isEdited);
   const shareKeyboard = getShareKeyboard(bMsg.text || bMsg.caption || 'Сообщение');
 
   // Получатели: владелец + доверенные лица
@@ -244,10 +306,14 @@ async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited =
   }
 
   for (const recipientId of recipients) {
-    try {
-      const isDelegate = recipientId !== targetOwnerId;
-      const delegatePrefix = isDelegate ? `<i>[ПЕРЕСЛАНО ИЗ БИЗНЕС-АККАУНТА @${sender?.username || targetOwnerId}]</i>\n\n` : '';
+    const isDelegate = recipientId !== targetOwnerId;
+    const delegatePrefix = isDelegate ? `<i>[ПЕРЕСЛАНО ИЗ БИЗНЕС-АККАУНТА @${escapeHtml(sender?.username) || targetOwnerId}]</i>\n\n` : '';
+    const delegatePlainPrefix = isDelegate ? `[ПЕРЕСЛАНО ИЗ БИЗНЕС-АККАУНТА @${sender?.username || targetOwnerId}]\n\n` : '';
 
+    let dispatchedSuccessfully = false;
+
+    // PRIMARY DISPATCH PIPELINE
+    try {
       // 1. ТЕКСТОВОЕ СООБЩЕНИЕ
       if (bMsg.text) {
         const fullText = `${delegatePrefix}${header}\n\n✉️ <b>Текст сообщения:</b>\n<blockquote>${escapeHtml(bMsg.text)}</blockquote>`;
@@ -262,13 +328,12 @@ async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited =
             reply_markup: isDelegate ? undefined : shareKeyboard,
           });
         }
-        continue;
+        dispatchedSuccessfully = true;
       }
-
       // 2. ФОТОГРАФИЯ
-      if (bMsg.photo && bMsg.photo.length > 0) {
+      else if (bMsg.photo && bMsg.photo.length > 0) {
         const highestPhoto = bMsg.photo[bMsg.photo.length - 1];
-        const captionText = bMsg.caption ? `\n\n💬 <b>Подпись к фото:</b>\n<blockquote>${escapeHtml(bMsg.caption)}</blockquote>` : '';
+        const captionText = bMsg.caption ? `\n\n💬 <b>Подпись:</b>\n<blockquote>${escapeHtml(bMsg.caption)}</blockquote>` : '';
         const fullCaption = `${delegatePrefix}${header}${captionText}`;
         
         if (fullCaption.length <= 1024) {
@@ -283,11 +348,10 @@ async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited =
             reply_markup: isDelegate ? undefined : shareKeyboard,
           });
         }
-        continue;
+        dispatchedSuccessfully = true;
       }
-
       // 3. ГОЛОСОВОЕ СООБЩЕНИЕ
-      if (bMsg.voice) {
+      else if (bMsg.voice) {
         const duration = bMsg.voice.duration || 0;
         const fullCaption = `${delegatePrefix}${header}\n\n🎤 <i>Голосовое сообщение (${duration} сек.)</i>`;
         if (fullCaption.length <= 1024) {
@@ -302,20 +366,18 @@ async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited =
             reply_markup: isDelegate ? undefined : shareKeyboard,
           });
         }
-        continue;
+        dispatchedSuccessfully = true;
       }
-
       // 4. ВИДЕОСООБЩЕНИЕ (Кружочек)
-      if (bMsg.video_note) {
+      else if (bMsg.video_note) {
         await telegram.sendMessage(recipientId, `${delegatePrefix}${header}\n\n🎥 <i>Видеосообщение (кружочек)</i>`, { parse_mode: 'HTML' });
         await telegram.sendVideoNote(recipientId, bMsg.video_note.file_id, {
           reply_markup: isDelegate ? undefined : shareKeyboard,
         });
-        continue;
+        dispatchedSuccessfully = true;
       }
-
       // 5. ДОКУМЕНТ / ФАЙЛ
-      if (bMsg.document) {
+      else if (bMsg.document) {
         const docName = bMsg.document.file_name ? ` (<code>${escapeHtml(bMsg.document.file_name)}</code>)` : '';
         const captionText = bMsg.caption ? `\n\n💬 <b>Подпись:</b>\n<blockquote>${escapeHtml(bMsg.caption)}</blockquote>` : '';
         const fullCaption = `${delegatePrefix}${header}\n📁 <b>Файл:</b>${docName}${captionText}`;
@@ -332,11 +394,10 @@ async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited =
             reply_markup: isDelegate ? undefined : shareKeyboard,
           });
         }
-        continue;
+        dispatchedSuccessfully = true;
       }
-
       // 6. ВИДЕО
-      if (bMsg.video) {
+      else if (bMsg.video) {
         const captionText = bMsg.caption ? `\n\n💬 <b>Подпись:</b>\n<blockquote>${escapeHtml(bMsg.caption)}</blockquote>` : '';
         const fullCaption = `${delegatePrefix}${header}${captionText}`;
         if (fullCaption.length <= 1024) {
@@ -351,11 +412,10 @@ async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited =
             reply_markup: isDelegate ? undefined : shareKeyboard,
           });
         }
-        continue;
+        dispatchedSuccessfully = true;
       }
-
       // 7. АУДИОЗАПИСЬ
-      if (bMsg.audio) {
+      else if (bMsg.audio) {
         const fullCaption = `${delegatePrefix}${header}\n\n🎵 <b>Аудио:</b> ${escapeHtml(bMsg.audio.performer || '')} — ${escapeHtml(bMsg.audio.title || '')}`;
         if (fullCaption.length <= 1024) {
           await telegram.sendAudio(recipientId, bMsg.audio.file_id, {
@@ -369,40 +429,36 @@ async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited =
             reply_markup: isDelegate ? undefined : shareKeyboard,
           });
         }
-        continue;
+        dispatchedSuccessfully = true;
       }
-
       // 8. СТИКЕР
-      if (bMsg.sticker) {
+      else if (bMsg.sticker) {
         const emoji = bMsg.sticker.emoji ? ` (${bMsg.sticker.emoji})` : '';
         await telegram.sendMessage(recipientId, `${delegatePrefix}${header}\n\n🏷 <b>Стикер</b>${emoji}`, { parse_mode: 'HTML' });
         await telegram.sendSticker(recipientId, bMsg.sticker.file_id, {
           reply_markup: isDelegate ? undefined : shareKeyboard,
         });
-        continue;
+        dispatchedSuccessfully = true;
       }
-
       // 9. АНИМАЦИЯ / GIF
-      if (bMsg.animation) {
+      else if (bMsg.animation) {
         await telegram.sendAnimation(recipientId, bMsg.animation.file_id, {
           caption: header.length <= 1024 ? `${delegatePrefix}${header}` : undefined,
           parse_mode: 'HTML',
           reply_markup: isDelegate ? undefined : shareKeyboard,
         });
-        continue;
+        dispatchedSuccessfully = true;
       }
-
       // 10. ЛОКАЦИЯ
-      if (bMsg.location) {
+      else if (bMsg.location) {
         await telegram.sendMessage(recipientId, `${delegatePrefix}${header}\n\n📍 <b>Геолокация:</b>`, { parse_mode: 'HTML' });
         await telegram.sendLocation(recipientId, bMsg.location.latitude, bMsg.location.longitude, {
           reply_markup: isDelegate ? undefined : shareKeyboard,
         });
-        continue;
+        dispatchedSuccessfully = true;
       }
-
       // 11. КОНТАКТ
-      if (bMsg.contact) {
+      else if (bMsg.contact) {
         await telegram.sendMessage(
           recipientId,
           `${delegatePrefix}${header}\n\n👤 <b>Контакт:</b> ${escapeHtml(bMsg.contact.first_name)} ${escapeHtml(bMsg.contact.last_name || '')} (${escapeHtml(bMsg.contact.phone_number)})`,
@@ -412,23 +468,63 @@ async function dispatchBusinessMessage(telegram, bMsg, targetOwnerId, isEdited =
           last_name: bMsg.contact.last_name,
           reply_markup: isDelegate ? undefined : shareKeyboard,
         });
-        continue;
+        dispatchedSuccessfully = true;
       }
-
-      // Резервный вариант
-      await telegram.sendMessage(recipientId, `${delegatePrefix}${header}`, {
-        parse_mode: 'HTML',
-        reply_markup: isDelegate ? undefined : shareKeyboard,
-      });
-      if (fromChatId && messageId) {
-        try {
-          await telegram.copyMessage(recipientId, fromChatId, messageId);
-        } catch (copyErr) {
-          console.warn('[FALLBACK_COPY_FAILED]', copyErr?.message || copyErr);
+      // 12. ОПРОС
+      else if (bMsg.poll) {
+        await telegram.sendMessage(
+          recipientId,
+          `${delegatePrefix}${header}\n\n📊 <b>Опрос:</b> ${escapeHtml(bMsg.poll.question)}`,
+          { parse_mode: 'HTML', reply_markup: isDelegate ? undefined : shareKeyboard }
+        );
+        dispatchedSuccessfully = true;
+      }
+      // 13. АНИМАЦИЯ / КОСТИ
+      else if (bMsg.dice) {
+        await telegram.sendMessage(
+          recipientId,
+          `${delegatePrefix}${header}\n\n🎲 <b>Анимация/Кости:</b> ${bMsg.dice.emoji} (Значение: ${bMsg.dice.value})`,
+          { parse_mode: 'HTML', reply_markup: isDelegate ? undefined : shareKeyboard }
+        );
+        dispatchedSuccessfully = true;
+      }
+      // 14. Резервный вариант
+      else {
+        const captionOrText = bMsg.caption || bMsg.text || 'Вложение';
+        await telegram.sendMessage(recipientId, `${delegatePrefix}${header}\n\n📎 ${escapeHtml(captionOrText)}`, {
+          parse_mode: 'HTML',
+          reply_markup: isDelegate ? undefined : shareKeyboard,
+        });
+        if (fromChatId && messageId) {
+          try {
+            await telegram.copyMessage(recipientId, fromChatId, messageId);
+          } catch (copyErr) {
+            console.warn('[FALLBACK_COPY_FAILED]', copyErr?.message || copyErr);
+          }
         }
+        dispatchedSuccessfully = true;
       }
     } catch (sendErr) {
-      console.error(`[DISPATCH_ERROR_RECIPIENT_${recipientId}]`, sendErr?.message || sendErr);
+      console.warn(`[PRIMARY_DISPATCH_WARN_RECIPIENT_${recipientId}]`, sendErr?.message || sendErr);
+    }
+
+    // ZERO-DROP RESILIENT FALLBACK: If HTML parse or media send failed, send plain text & native copy
+    if (!dispatchedSuccessfully) {
+      try {
+        const plainBody = bMsg.text || bMsg.caption || '[Медиа/Файл без текста]';
+        await telegram.sendMessage(
+          recipientId,
+          `${delegatePlainPrefix}${plainHeader}\n\nСодержимое:\n${plainBody}`
+        );
+        if (fromChatId && messageId) {
+          try {
+            await telegram.copyMessage(recipientId, fromChatId, messageId);
+          } catch {}
+        }
+        console.log(`[RESCUE_DISPATCH_SUCCESS] Rescued message ID ${messageId} for recipient ${recipientId}`);
+      } catch (rescueErr) {
+        console.error(`[RESCUE_DISPATCH_FAILED_RECIPIENT_${recipientId}]`, rescueErr?.message || rescueErr);
+      }
     }
   }
 }
@@ -492,8 +588,8 @@ bot.on('business_message', async (ctx) => {
     const sender = bMsg.from;
     const senderName = sender?.first_name || 'Собеседник';
 
-    // Автоматическое динамическое API-восстановление владельца
-    const targetOwnerId = await resolveOwnerId(ctx.telegram, businessConnectionId);
+    // Автоматическое динамическое мульти-стратегическое сопоставление
+    const targetOwnerId = await resolveOwnerId(ctx.telegram, businessConnectionId, sender, fromChat);
 
     console.log(`[BUSINESS_MSG_RECV] Conn: ${businessConnectionId}, FromChat: ${fromChatId}, Sender: ${senderName} (ID: ${sender?.id}) -> TargetOwner: ${targetOwnerId}`);
 
@@ -523,8 +619,9 @@ bot.on('edited_business_message', async (ctx) => {
     const fromChat = bMsg.chat;
     const fromChatId = fromChat?.id;
     const messageId = bMsg.message_id;
+    const sender = bMsg.from;
 
-    const targetOwnerId = await resolveOwnerId(ctx.telegram, businessConnectionId);
+    const targetOwnerId = await resolveOwnerId(ctx.telegram, businessConnectionId, sender, fromChat);
     if (!targetOwnerId) return;
 
     console.log(`[BUSINESS_MSG_EDITED] Chat: ${fromChatId}, Msg ID: ${messageId} -> TargetOwner: ${targetOwnerId}`);
@@ -535,11 +632,43 @@ bot.on('edited_business_message', async (ctx) => {
   }
 });
 
-// 5. Строгий глобальный фильтр для обычных сообщений: Личные сообщения (DM)
+// 5. Обработка удаленных сообщений в бизнес-чатах
+bot.on('deleted_business_messages', async (ctx) => {
+  try {
+    const delMsg = ctx.update.deleted_business_messages;
+    if (!delMsg) return;
+    const businessConnectionId = delMsg.business_connection_id;
+    const fromChat = delMsg.chat;
+    const messageIds = delMsg.message_ids || [];
+
+    const targetOwnerId = await resolveOwnerId(ctx.telegram, businessConnectionId, null, fromChat);
+    if (!targetOwnerId) return;
+
+    const chatTitle = fromChat
+      ? escapeHtml(fromChat.title || [fromChat.first_name, fromChat.last_name].filter(Boolean).join(' ') || fromChat.username || `Чат ${fromChat.id}`)
+      : 'Диалог';
+
+    console.log(`[DELETED_BUSINESS_MSG] Chat: ${fromChat?.id}, Count: ${messageIds.length} -> TargetOwner: ${targetOwnerId}`);
+
+    await ctx.telegram.sendMessage(
+      targetOwnerId,
+      `🗑 <b>[СЕКРЕТАРЬ • УДАЛЕНО СООБЩЕНИЕ В ЧАТЕ]</b>\n\n` +
+      `💬 <b>Диалог:</b> ${chatTitle}\n` +
+      `⚠️ В диалоге собеседник или вы удалили сообщений: <b>${messageIds.length} шт.</b>\n` +
+      `🆔 <b>ID удаленных сообщений:</b> <code>${messageIds.join(', ')}</code>\n` +
+      `📅 <b>Когда:</b> ${new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Europe/Moscow' })} (МСК)`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (err) {
+    console.error('[DELETED_BUSINESS_MSG_ERROR]', err?.message || err);
+  }
+});
+
+// 6. Строгий глобальный фильтр для обычных сообщений: Личные сообщения (DM)
 bot.use(async (ctx, next) => {
   try {
     // Пропускаем бизнес-обновления
-    if (ctx.update.business_connection || ctx.update.business_message || ctx.update.edited_business_message) {
+    if (ctx.update.business_connection || ctx.update.business_message || ctx.update.edited_business_message || ctx.update.deleted_business_messages) {
       return await next();
     }
 
